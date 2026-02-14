@@ -1,0 +1,1756 @@
+// =============================================================================
+// Battery Management System (BMS) — Complete FlowSpec RFLP Example
+// =============================================================================
+// Models a lithium-ion battery management system for an electric vehicle.
+// Covers cell monitoring, state estimation (SOC/SOH), thermal management,
+// cell balancing, charging control, and fault isolation across all RFLP layers.
+//
+// Pack topology: 108s4p (108 cells in series, 4 in parallel = 27 modules × 4s4p)
+// Nominal voltage: 400V | Capacity: ~80 kWh
+
+// -----------------------------------------------------------------------------
+// Project Metadata
+// -----------------------------------------------------------------------------
+
+project "Battery Management System" {
+  version: "2.0"
+}
+
+// -----------------------------------------------------------------------------
+// Schema — Data Type Definitions
+// -----------------------------------------------------------------------------
+
+schema {
+
+  // --- Electrical primitives ---
+
+  type CellVoltage: physical float64 [unit: "V", range: 2.5..4.2]
+  type PackVoltage: physical float64 [unit: "V", range: 270..420]
+  type PackCurrent: physical float64 [unit: "A", range: -350..350]
+  type Resistance: physical float64 [unit: "mΩ", range: 0..500]
+  type Energy: physical float64 [unit: "kWh", range: 0..100]
+  type Power: physical float64 [unit: "kW", range: -150..250]
+
+  // --- Thermal primitives ---
+
+  type Temperature: physical float64 [unit: "°C", range: -40..80]
+  type CoolantFlow: physical float64 [unit: "L/min", range: 0..20]
+  type CoolantTemp: physical float64 [unit: "°C", range: -10..60]
+
+  // --- State/percentage types ---
+
+  type Percentage: float64 [range: 0..100]
+  type SOC: float64 [unit: "%", range: 0..100]
+  type SOH: float64 [unit: "%", range: 0..100]
+  type Timestamp: uint64 [unit: "ms"]
+
+  // --- Indices and identifiers ---
+
+  type CellIndex: uint16 [range: 0..431]
+  type ModuleIndex: uint8 [range: 0..26]
+
+  // --- Enumerations ---
+
+  type BMSState: enum {
+    off, standby, driving, charging,
+    precharging, error, emergency_shutdown
+  }
+
+  type ChargeMode: enum { off, ac_slow, ac_fast, dc_fast, dc_ultra }
+
+  type BalancingMode: enum { off, passive, active }
+
+  type ContactorState: enum { open, closing, closed, welded, error }
+
+  type FaultSeverity: enum { info, warning, critical, fatal }
+
+  type ThermalAction: enum { idle, heating, cooling_low, cooling_high, emergency_cool }
+
+  type CellChemistry: enum { NMC811, NMC622, LFP, NCA }
+
+  type IsolationStatus: enum { ok, degraded, fault }
+
+  // --- Structures ---
+
+  type CellData: struct {
+    voltage: CellVoltage
+    temperature: Temperature
+    balancing: boolean
+  }
+
+  type CellArray: array<CellData> [size: 4]
+
+  type ModuleData: struct {
+    moduleId: ModuleIndex
+    cells: CellArray
+    moduleTemp: Temperature
+    moduleVoltage: PackVoltage
+  }
+
+  type PackState: struct {
+    voltage: PackVoltage
+    current: PackCurrent
+    soc: SOC
+    soh: SOH
+    power: Power
+    energy: Energy
+    bmsState: BMSState
+    timestamp: Timestamp
+  }
+
+  type CellStatistics: struct {
+    minVoltage: CellVoltage
+    maxVoltage: CellVoltage
+    avgVoltage: CellVoltage
+    deltaVoltage: CellVoltage
+    minTemp: Temperature
+    maxTemp: Temperature
+    avgTemp: Temperature
+    deltaTemp: Temperature
+  }
+
+  type ThermalStatus: struct {
+    coolantInletTemp: CoolantTemp
+    coolantOutletTemp: CoolantTemp
+    coolantFlow: CoolantFlow
+    action: ThermalAction
+    pumpDuty: Percentage
+    valvePosition: Percentage
+  }
+
+  type ChargeRequest: struct {
+    mode: ChargeMode
+    targetSOC: SOC
+    maxCurrent: PackCurrent
+    maxVoltage: PackVoltage
+  }
+
+  type ChargeLimits: struct {
+    maxChargeCurrent: PackCurrent
+    maxDischargeCurrent: PackCurrent
+    maxChargeVoltage: PackVoltage
+    minDischargeVoltage: PackVoltage
+    maxChargePower: Power
+    maxDischargePower: Power
+  }
+
+  type ContactorCommand: struct {
+    mainPositive: ContactorState
+    mainNegative: ContactorState
+    precharge: ContactorState
+  }
+
+  type FaultEntry: struct {
+    code: uint16
+    severity: FaultSeverity
+    moduleId: ModuleIndex
+    cellId: CellIndex
+    value: float64
+    timestamp: Timestamp
+  }
+
+  type IsolationMeasurement: struct {
+    resistancePositive: Resistance
+    resistanceNegative: Resistance
+    status: IsolationStatus
+  }
+
+  // --- Array types ---
+
+  type ModuleArray: array<ModuleData> [size: 27]
+  type FaultLog: array<FaultEntry> [size: 64]
+  type SOCHistory: array<SOC> [size: 1000]
+}
+
+// -----------------------------------------------------------------------------
+// Requirements (R Layer)
+// -----------------------------------------------------------------------------
+
+requirements "BMS System Requirements" {
+  spec-type: system_spec
+
+  // --- Cell monitoring ---
+
+  req BMS-001 "Cell Voltage Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall measure individual cell voltages of all 432 cells
+               with an accuracy of ±2 mV at a minimum rate of 10 Hz."
+    integrity: "ASIL_C"
+    quality {
+      metric: "accuracy"
+      target: "2mV"
+      verification: "Calibration test"
+    }
+  }
+
+  req BMS-002 "Cell Temperature Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall measure cell temperatures at a minimum of one
+               sensor per module (27 sensors) with ±1°C accuracy at 1 Hz."
+    integrity: "ASIL_C"
+  }
+
+  // --- State estimation ---
+
+  req BMS-010 "State of Charge Estimation" {
+    type: functional
+    priority: must
+    statement: "The BMS shall estimate pack SOC with an accuracy of ±3%
+               under all operating conditions using Coulomb counting
+               combined with model-based correction."
+    quality {
+      metric: "accuracy"
+      target: "3%"
+      verification: "Drive cycle test"
+    }
+  }
+
+  req BMS-011 "State of Health Estimation" {
+    type: functional
+    priority: should
+    statement: "The BMS shall estimate cell SOH based on internal resistance
+               trends and capacity fade, updated at least once per
+               charge/discharge cycle."
+  }
+
+  // --- Safety and protection ---
+
+  req BMS-020 "Overvoltage Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 10ms if any
+               cell voltage exceeds 4.25 V."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "10ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-021 "Undervoltage Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 10ms if any
+               cell voltage drops below 2.3 V."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "10ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-022 "Overcurrent Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 5ms if pack
+               current exceeds 400 A (discharge) or 300 A (charge)."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "5ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-023 "Overtemperature Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 100ms if any
+               cell temperature exceeds 60°C."
+    integrity: "ASIL_C"
+  }
+
+  req BMS-024 "Isolation Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall continuously monitor HV isolation resistance
+               and trigger a warning below 500 Ω/V and a fault below 100 Ω/V."
+    integrity: "ASIL_C"
+  }
+
+  // --- Thermal management ---
+
+  req BMS-030 "Thermal Regulation" {
+    type: functional
+    priority: must
+    statement: "The BMS shall maintain all cell temperatures between 15°C
+               and 45°C during normal operation by controlling the coolant
+               pump and heating elements."
+  }
+
+  req BMS-031 "Pre-Conditioning" {
+    type: functional
+    priority: should
+    statement: "The BMS shall support battery pre-conditioning (heating
+               before fast charge) to bring cell temperatures above 10°C."
+  }
+
+  // --- Balancing ---
+
+  req BMS-040 "Cell Balancing" {
+    type: functional
+    priority: must
+    statement: "The BMS shall perform passive cell balancing to maintain
+               cell voltage delta below 20 mV across all series cells."
+  }
+
+  // --- Charging ---
+
+  req BMS-050 "Charge Control" {
+    type: functional
+    priority: must
+    statement: "The BMS shall communicate dynamic charge current limits
+               to the charger via CAN at 10 Hz based on cell voltages,
+               temperatures, and SOC."
+  }
+
+  req BMS-051 "DC Fast Charge Support" {
+    type: functional
+    priority: must
+    statement: "The BMS shall support DC fast charging up to 150 kW
+               using CCS protocol with dynamic power negotiation."
+  }
+
+  // --- Diagnostics ---
+
+  req BMS-060 "Fault Logging" {
+    type: non_functional
+    priority: must
+    statement: "The BMS shall log all detected faults with timestamp,
+               severity, module/cell ID and measured value in persistent
+               memory (min. 64 entries)."
+  }
+
+  req BMS-061 "Contactor Welding Detection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall detect welded contactors by measuring
+               voltage difference across open contactors."
+    integrity: "ASIL_D"
+  }
+
+  // --- Communication ---
+
+  req BMS-070 "VCU Communication" {
+    type: functional
+    priority: must
+    statement: "The BMS shall report pack state (voltage, current, SOC,
+               SOH, limits, faults) to the vehicle control unit via
+               CAN-FD at 100 Hz."
+  }
+
+  req BMS-071 "Diagnostic Communication" {
+    type: non_functional
+    priority: should
+    statement: "The BMS shall support UDS-based diagnostic access for
+               reading cell data, fault memory, and calibration parameters."
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Functional Architecture (F Layer)
+// -----------------------------------------------------------------------------
+
+functional "BMS Functions" {
+
+  // =========================================================================
+  // Sense — Data acquisition functions
+  // =========================================================================
+
+  function AcquireCellData: source {
+    port cellDataOut: out ModuleArray
+    port cellStatsOut: out CellStatistics
+    tags: [real-time, safety-relevant]
+    integrity: "ASIL_C"
+
+    function MeasureCellVoltages: source {
+      port voltagesOut: out ModuleArray
+    }
+
+    function MeasureCellTemperatures: source {
+      port temperaturesOut: out ModuleArray
+    }
+
+    function CalcCellStatistics: transform {
+      port cellsIn: in ModuleArray
+      port statsOut: out CellStatistics
+    }
+
+    flow MeasureCellVoltages.voltagesOut -> CalcCellStatistics.cellsIn
+  }
+
+  function MeasurePackElectrical: source {
+    port voltageOut: out PackVoltage
+    port currentOut: out PackCurrent
+    port isolationOut: out IsolationMeasurement
+    integrity: "ASIL_D"
+  }
+
+  function MeasureCoolant: source {
+    port coolantTempIn: out CoolantTemp
+    port coolantTempOut: out CoolantTemp
+    port coolantFlowOut: out CoolantFlow
+  }
+
+  // =========================================================================
+  // Think — Processing and control functions
+  // =========================================================================
+
+  function EstimateState: transform {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port voltageIn: in PackVoltage
+    port currentIn: in PackCurrent
+    port socOut: out SOC
+    port sohOut: out SOH
+    port energyOut: out Energy
+
+    function EstimateSOC: transform {
+      port currentIn: in PackCurrent
+      port voltageIn: in PackVoltage
+      port cellStatsIn: in CellStatistics
+      port socOut: out SOC
+
+      // Coulomb counting + Extended Kalman Filter
+      tags: [model-based, real-time]
+    }
+
+    function EstimateSOH: transform {
+      port cellDataIn: in ModuleArray
+      port currentIn: in PackCurrent
+      port socIn: in SOC
+      port sohOut: out SOH
+
+      tags: [model-based]
+    }
+
+    function CalcEnergy: transform {
+      port socIn: in SOC
+      port sohIn: in SOH
+      port energyOut: out Energy
+    }
+
+    flow EstimateSOC.socOut -> EstimateSOH.socIn
+    flow EstimateSOC.socOut -> CalcEnergy.socIn
+    flow EstimateSOH.sohOut -> CalcEnergy.sohIn
+  }
+
+  function ComputeLimits: transform {
+    port socIn: in SOC
+    port cellStatsIn: in CellStatistics
+    port currentIn: in PackCurrent
+    port limitsOut: out ChargeLimits
+    integrity: "ASIL_C"
+
+    function CalcCurrentLimits: transform {
+      port socIn: in SOC
+      port cellStatsIn: in CellStatistics
+      port limitsOut: out ChargeLimits
+    }
+
+    function DeratePower: transform {
+      port limitsIn: in ChargeLimits
+      port cellStatsIn: in CellStatistics
+      port limitsOut: out ChargeLimits
+      // Temperature- and SOC-based derating curves
+    }
+
+    flow CalcCurrentLimits.limitsOut -> DeratePower.limitsIn
+  }
+
+  function ControlBalancing: control {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port balancingCmdOut: out ModuleArray
+
+    function SelectCellsForBalancing: transform {
+      port cellDataIn: in ModuleArray
+      port statsIn: in CellStatistics
+      port targetCellsOut: out ModuleArray
+    }
+
+    function CalcBalancingDuty: transform {
+      port targetCellsIn: in ModuleArray
+      port commandsOut: out ModuleArray
+    }
+
+    flow SelectCellsForBalancing.targetCellsOut -> CalcBalancingDuty.targetCellsIn
+  }
+
+  function ControlThermal: control {
+    port cellStatsIn: in CellStatistics
+    port coolantTempIn: in CoolantTemp
+    port coolantFlowIn: in CoolantFlow
+    port thermalStatusOut: out ThermalStatus
+
+    function DetermineAction: transform {
+      port cellStatsIn: in CellStatistics
+      port coolantIn: in CoolantTemp
+      port actionOut: out ThermalAction
+    }
+
+    function CalcPumpValve: transform {
+      port actionIn: in ThermalAction
+      port cellStatsIn: in CellStatistics
+      port pumpDutyOut: out Percentage
+      port valvePositionOut: out Percentage
+    }
+
+    flow DetermineAction.actionOut -> CalcPumpValve.actionIn
+  }
+
+  function ControlCharging: control {
+    port socIn: in SOC
+    port limitsIn: in ChargeLimits
+    port cellStatsIn: in CellStatistics
+    port chargeRequestIn: in ChargeRequest
+    port chargeLimitsOut: out ChargeLimits
+    port contactorCmdOut: out ContactorCommand
+
+    function NegotiateChargePower: transform {
+      port requestIn: in ChargeRequest
+      port limitsIn: in ChargeLimits
+      port cellStatsIn: in CellStatistics
+      port negotiatedOut: out ChargeLimits
+    }
+
+    function ControlPrecharge: control {
+      port voltageIn: in PackVoltage
+      port contactorCmdOut: out ContactorCommand
+    }
+  }
+
+  function SuperviseSafety: control {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port voltageIn: in PackVoltage
+    port currentIn: in PackCurrent
+    port isolationIn: in IsolationMeasurement
+    port contactorCmdOut: out ContactorCommand
+    port faultOut: out FaultEntry
+    integrity: "ASIL_D"
+    tags: [safety-relevant, real-time]
+
+    function CheckCellLimits: transform {
+      port cellDataIn: in ModuleArray
+      port statsIn: in CellStatistics
+      port faultOut: out FaultEntry
+      integrity: "ASIL_D"
+    }
+
+    function CheckPackLimits: transform {
+      port voltageIn: in PackVoltage
+      port currentIn: in PackCurrent
+      port faultOut: out FaultEntry
+      integrity: "ASIL_D"
+    }
+
+    function CheckIsolation: transform {
+      port isolationIn: in IsolationMeasurement
+      port faultOut: out FaultEntry
+      integrity: "ASIL_C"
+    }
+
+    function DecideContactor: control {
+      port cellFaultIn: in FaultEntry
+      port packFaultIn: in FaultEntry
+      port isoFaultIn: in FaultEntry
+      port contactorCmdOut: out ContactorCommand
+      integrity: "ASIL_D"
+    }
+
+    flow CheckCellLimits.faultOut -> DecideContactor.cellFaultIn
+    flow CheckPackLimits.faultOut -> DecideContactor.packFaultIn
+    flow CheckIsolation.faultOut -> DecideContactor.isoFaultIn
+  }
+
+  function ManageDiagnostics: transform {
+    port faultIn: in FaultEntry
+    port packStateIn: in PackState
+    port logOut: out FaultLog
+    port udsResponseOut: out string
+  }
+
+  // =========================================================================
+  // Act — Output functions
+  // =========================================================================
+
+  function DriveContactors: sink {
+    port contactorCmdIn: in ContactorCommand
+    integrity: "ASIL_D"
+  }
+
+  function DriveBalancing: sink {
+    port balancingCmdIn: in ModuleArray
+  }
+
+  function DriveCoolant: sink {
+    port thermalStatusIn: in ThermalStatus
+  }
+
+  function ReportToVCU: sink {
+    port packStateIn: in PackState
+    port limitsIn: in ChargeLimits
+    port faultLogIn: in FaultLog
+  }
+
+  // =========================================================================
+  // Top-level flows
+  // =========================================================================
+
+  // Sense -> Think
+  flow AcquireCellData.cellDataOut -> EstimateState.cellDataIn
+  flow AcquireCellData.cellDataOut -> ControlBalancing.cellDataIn
+  flow AcquireCellData.cellDataOut -> SuperviseSafety.cellDataIn
+  flow AcquireCellData.cellStatsOut -> EstimateState.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ComputeLimits.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlBalancing.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlThermal.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlCharging.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> SuperviseSafety.cellStatsIn
+
+  flow MeasurePackElectrical.voltageOut -> EstimateState.voltageIn
+  flow MeasurePackElectrical.currentOut -> EstimateState.currentIn
+  flow MeasurePackElectrical.currentOut -> ComputeLimits.currentIn
+  flow MeasurePackElectrical.voltageOut -> SuperviseSafety.voltageIn
+  flow MeasurePackElectrical.currentOut -> SuperviseSafety.currentIn
+  flow MeasurePackElectrical.isolationOut -> SuperviseSafety.isolationIn
+
+  flow MeasureCoolant.coolantTempIn -> ControlThermal.coolantTempIn
+  flow MeasureCoolant.coolantFlowOut -> ControlThermal.coolantFlowIn
+
+  // Think -> Think
+  flow EstimateState.socOut -> ComputeLimits.socIn
+  flow EstimateState.socOut -> ControlCharging.socIn
+  flow ComputeLimits.limitsOut -> ControlCharging.limitsIn
+
+  // Think -> Act
+  flow SuperviseSafety.contactorCmdOut -> DriveContactors.contactorCmdIn
+  flow ControlBalancing.balancingCmdOut -> DriveBalancing.balancingCmdIn
+  flow ControlThermal.thermalStatusOut -> DriveCoolant.thermalStatusIn
+  flow SuperviseSafety.faultOut -> ManageDiagnostics.faultIn
+  flow ControlCharging.chargeLimitsOut -> ReportToVCU.limitsIn
+
+  // =========================================================================
+  // Interfaces and actors
+  // =========================================================================
+
+  interface CellSensorInterface {
+    provided cellVoltages: ModuleArray
+    provided cellTemperatures: ModuleArray
+  }
+
+  interface PackSensorInterface {
+    provided packVoltage: PackVoltage
+    provided packCurrent: PackCurrent
+    provided isolation: IsolationMeasurement
+  }
+
+  interface CoolantSensorInterface {
+    provided coolantTemps: CoolantTemp
+    provided coolantFlow: CoolantFlow
+  }
+
+  interface ContactorInterface {
+    required contactorCmd: ContactorCommand
+  }
+
+  interface BalancingInterface {
+    required balancingCmd: ModuleArray
+  }
+
+  interface CoolantActuatorInterface {
+    required pumpDuty: Percentage
+    required valvePosition: Percentage
+  }
+
+  interface VCUInterface {
+    required packState: PackState
+    required chargeLimits: ChargeLimits
+    required faultLog: FaultLog
+  }
+
+  interface ChargerInterface {
+    provided chargeRequest: ChargeRequest
+    required chargeLimits: ChargeLimits
+  }
+
+  interface DiagnosticInterface {
+    provided udsRequest: string
+    required udsResponse: string
+  }
+
+  actor VehicleControlUnit: external_system {
+    interfaces: [VCUInterface]
+  }
+
+  actor DCCharger: external_system {
+    interfaces: [ChargerInterface]
+  }
+
+  actor DiagnosticTester: external_system {
+    interfaces: [DiagnosticInterface]
+  }
+
+  actor BatteryPack: environment {
+    interfaces: [CellSensorInterface, PackSensorInterface,
+                 ContactorInterface, BalancingInterface]
+  }
+
+  actor CoolingCircuit: environment {
+    interfaces: [CoolantSensorInterface, CoolantActuatorInterface]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Logical Architecture (L Layer)
+// -----------------------------------------------------------------------------
+
+logical "BMS Architecture" {
+
+  // =========================================================================
+  // Cell Monitoring Subsystem (distributed on CMICs)
+  // =========================================================================
+
+  component CellMonitoringSubsystem: subsystem {
+    port cellData: flow provided
+    port cellStats: flow provided
+    port balancingCmd: flow required
+    port diagnostics: service provided
+    integrity: "ASIL_C"
+
+    component CellMonitorIC: block {
+      port voltages: flow provided
+      port temperatures: flow provided
+      port balancing: flow required
+      // Represents one CMIC monitoring 12 cells (one per 3 modules)
+    }
+
+    component CellAggregator: block {
+      port rawCellData: flow required
+      port aggregatedData: flow provided
+      port stats: flow provided
+    }
+
+    connect CellMonitorIC.voltages -> CellAggregator.rawCellData : flow
+    connect CellAggregator.aggregatedData -> cellData : delegation
+    connect CellAggregator.stats -> cellStats : delegation
+    connect balancingCmd -> CellMonitorIC.balancing : delegation
+  }
+
+  // =========================================================================
+  // Pack Measurement Subsystem
+  // =========================================================================
+
+  component PackMeasurementSubsystem: subsystem {
+    port packVoltage: flow provided
+    port packCurrent: flow provided
+    port isolation: flow provided
+    integrity: "ASIL_D"
+
+    component VoltageSensor: block {
+      port voltageOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component CurrentSensor: block {
+      port currentOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component IsolationMonitor: block {
+      port isoOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    connect VoltageSensor.voltageOut -> packVoltage : delegation
+    connect CurrentSensor.currentOut -> packCurrent : delegation
+    connect IsolationMonitor.isoOut -> isolation : delegation
+  }
+
+  // =========================================================================
+  // BMS Controller (central processing)
+  // =========================================================================
+
+  component BMSController: subsystem {
+    port cellDataIn: flow required
+    port cellStatsIn: flow required
+    port packVoltageIn: flow required
+    port packCurrentIn: flow required
+    port isolationIn: flow required
+    port coolantTempIn: flow required
+    port coolantFlowIn: flow required
+    port chargeRequestIn: flow required
+    port contactorCmdOut: flow provided
+    port balancingCmdOut: flow provided
+    port thermalCmdOut: flow provided
+    port chargeLimitsOut: flow provided
+    port vcuReportOut: flow provided
+    port faultLogOut: service provided
+    port diagPort: service bidirectional
+
+    integrity: "ASIL_D"
+
+    component StateEstimator: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port voltageIn: flow required
+      port currentIn: flow required
+      port socOut: flow provided
+      port sohOut: flow provided
+      port energyOut: flow provided
+    }
+
+    component LimitsCalculator: block {
+      port socIn: flow required
+      port cellStatsIn: flow required
+      port currentIn: flow required
+      port limitsOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    component BalancingController: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port balancingCmdOut: flow provided
+    }
+
+    component ThermalController: block {
+      port cellStatsIn: flow required
+      port coolantTempIn: flow required
+      port coolantFlowIn: flow required
+      port thermalCmdOut: flow provided
+    }
+
+    component ChargingController: block {
+      port socIn: flow required
+      port limitsIn: flow required
+      port cellStatsIn: flow required
+      port chargeRequestIn: flow required
+      port chargeLimitsOut: flow provided
+      port contactorCmdOut: flow provided
+    }
+
+    component SafetyManager: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port voltageIn: flow required
+      port currentIn: flow required
+      port isolationIn: flow required
+      port contactorCmdOut: flow provided
+      port faultOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component DiagnosticsController: block {
+      port faultIn: flow required
+      port diagPort: service bidirectional
+      port logOut: service provided
+    }
+
+    // --- Internal connections ---
+
+    // Sensor data distribution
+    connect cellDataIn -> StateEstimator.cellDataIn : flow
+    connect cellDataIn -> BalancingController.cellDataIn : flow
+    connect cellDataIn -> SafetyManager.cellDataIn : flow
+    connect cellStatsIn -> StateEstimator.cellStatsIn : flow
+    connect cellStatsIn -> LimitsCalculator.cellStatsIn : flow
+    connect cellStatsIn -> BalancingController.cellStatsIn : flow
+    connect cellStatsIn -> ThermalController.cellStatsIn : flow
+    connect cellStatsIn -> ChargingController.cellStatsIn : flow
+    connect cellStatsIn -> SafetyManager.cellStatsIn : flow
+    connect packVoltageIn -> StateEstimator.voltageIn : flow
+    connect packVoltageIn -> SafetyManager.voltageIn : flow
+    connect packCurrentIn -> StateEstimator.currentIn : flow
+    connect packCurrentIn -> LimitsCalculator.currentIn : flow
+    connect packCurrentIn -> SafetyManager.currentIn : flow
+    connect isolationIn -> SafetyManager.isolationIn : flow
+    connect coolantTempIn -> ThermalController.coolantTempIn : flow
+    connect coolantFlowIn -> ThermalController.coolantFlowIn : flow
+    connect chargeRequestIn -> ChargingController.chargeRequestIn : delegation
+
+    // Internal processing flows
+    connect StateEstimator.socOut -> LimitsCalculator.socIn : flow
+    connect StateEstimator.socOut -> ChargingController.socIn : flow
+    connect LimitsCalculator.limitsOut -> ChargingController.limitsIn : flow
+
+    // Output delegations
+    connect SafetyManager.contactorCmdOut -> contactorCmdOut : delegation
+    connect BalancingController.balancingCmdOut -> balancingCmdOut : delegation
+    connect ThermalController.thermalCmdOut -> thermalCmdOut : delegation
+    connect ChargingController.chargeLimitsOut -> chargeLimitsOut : delegation
+    connect SafetyManager.faultOut -> DiagnosticsController.faultIn : flow
+    connect DiagnosticsController.logOut -> faultLogOut : delegation
+    connect DiagnosticsController.diagPort -> diagPort : delegation
+  }
+
+  // =========================================================================
+  // Actuator Subsystems
+  // =========================================================================
+
+  component ContactorSubsystem: subsystem {
+    port contactorCmd: flow required
+    port contactorFeedback: flow provided
+    integrity: "ASIL_D"
+
+    component MainContactor: block {
+      port cmdIn: flow required
+      port feedbackOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component PrechargeContactor: block {
+      port cmdIn: flow required
+      port feedbackOut: flow provided
+    }
+
+    connect contactorCmd -> MainContactor.cmdIn : delegation
+    connect contactorCmd -> PrechargeContactor.cmdIn : delegation
+  }
+
+  component ThermalSubsystem: subsystem {
+    port thermalCmd: flow required
+    port coolantData: flow provided
+
+    component CoolantPump: block {
+      port dutyIn: flow required
+      port flowOut: flow provided
+    }
+
+    component CoolantValve: block {
+      port positionIn: flow required
+    }
+
+    component HeatingElement: block {
+      port powerIn: flow required
+    }
+
+    connect thermalCmd -> CoolantPump.dutyIn : delegation
+    connect thermalCmd -> CoolantValve.positionIn : delegation
+    connect thermalCmd -> HeatingElement.powerIn : delegation
+  }
+
+  // =========================================================================
+  // Communication Subsystem
+  // =========================================================================
+
+  component CommunicationSubsystem: module {
+    port vcuData: flow required
+    port chargerData: flow bidirectional
+    port diagData: service bidirectional
+    port canBusOut: flow provided
+  }
+
+  // =========================================================================
+  // Top-level connections
+  // =========================================================================
+
+  connect CellMonitoringSubsystem.cellData -> BMSController.cellDataIn
+  connect CellMonitoringSubsystem.cellStats -> BMSController.cellStatsIn
+  connect PackMeasurementSubsystem.packVoltage -> BMSController.packVoltageIn
+  connect PackMeasurementSubsystem.packCurrent -> BMSController.packCurrentIn
+  connect PackMeasurementSubsystem.isolation -> BMSController.isolationIn
+  connect BMSController.contactorCmdOut -> ContactorSubsystem.contactorCmd
+  connect BMSController.balancingCmdOut -> CellMonitoringSubsystem.balancingCmd
+  connect BMSController.thermalCmdOut -> ThermalSubsystem.thermalCmd
+  connect BMSController.vcuReportOut -> CommunicationSubsystem.vcuData
+  connect BMSController.chargeLimitsOut -> CommunicationSubsystem.chargerData
+
+  // Interfaces
+  interface ICellMonitoring {
+    ports: [CellMonitoringSubsystem.cellData, BMSController.cellDataIn]
+  }
+
+  interface IPackMeasurement {
+    ports: [PackMeasurementSubsystem.packVoltage, BMSController.packVoltageIn]
+  }
+
+  interface IContactorControl {
+    ports: [BMSController.contactorCmdOut, ContactorSubsystem.contactorCmd]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Physical Architecture (P Layer)
+// -----------------------------------------------------------------------------
+
+physical "BMS Hardware" {
+
+  // =========================================================================
+  // BMS Master ECU
+  // =========================================================================
+
+  node BMSMasterECU: processing_unit {
+    port isoSPI1: electrical inout [protocol: "isoSPI"]
+    port isoSPI2: electrical inout [protocol: "isoSPI"]
+    port isoSPI3: electrical inout [protocol: "isoSPI"]
+    port can1: electrical inout [protocol: "CAN-FD"]
+    port can2: electrical inout [protocol: "CAN-FD"]
+    port hsd1: electrical out [protocol: "High-Side Driver"]
+    port hsd2: electrical out [protocol: "High-Side Driver"]
+    port pwm1: electrical out [protocol: "PWM"]
+    port pwm2: electrical out [protocol: "PWM"]
+    port adc1: electrical in [protocol: "Analog"]
+    port adc2: electrical in [protocol: "Analog"]
+    port adc3: electrical in [protocol: "Analog"]
+    port eth0: electrical inout [protocol: "100BASE-T1"]
+    resources {
+      cpu: "Infineon AURIX TC397 @300MHz (triple-core lockstep)"
+      memory: "6MB SRAM"
+      storage: "16MB Flash"
+    }
+    integrity: "ASIL_D"
+  }
+
+  // =========================================================================
+  // Cell Monitoring ICs (daisy-chained via isoSPI)
+  // =========================================================================
+
+  node CMIC_Chain1: sensor {
+    // Modules 0..8 (9 CMICs daisy-chained)
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  node CMIC_Chain2: sensor {
+    // Modules 9..17
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  node CMIC_Chain3: sensor {
+    // Modules 18..26
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  // =========================================================================
+  // Pack-level sensors
+  // =========================================================================
+
+  node HVVoltageSensor: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_D"
+  }
+
+  node HVCurrentSensor: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_D"
+  }
+
+  node IsolationMonitorIC: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_C"
+  }
+
+  node CoolantTempSensor1: sensor {
+    port analogOut: electrical out [protocol: "NTC Analog"]
+  }
+
+  node CoolantTempSensor2: sensor {
+    port analogOut: electrical out [protocol: "NTC Analog"]
+  }
+
+  node CoolantFlowSensor: sensor {
+    port pulseOut: electrical out [protocol: "Pulse"]
+  }
+
+  // =========================================================================
+  // Actuators
+  // =========================================================================
+
+  node MainContactorPos: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+    integrity: "ASIL_D"
+  }
+
+  node MainContactorNeg: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+    integrity: "ASIL_D"
+  }
+
+  node PrechargeRelay: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+  }
+
+  node CoolantPump: actuator {
+    port pwmIn: electrical in [protocol: "PWM"]
+  }
+
+  node CoolantValve: actuator {
+    port pwmIn: electrical in [protocol: "PWM"]
+  }
+
+  // =========================================================================
+  // Physical links
+  // =========================================================================
+
+  link isoSPIChain1: bus {
+    BMSMasterECU.isoSPI1 <-> CMIC_Chain1.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  link isoSPIChain2: bus {
+    BMSMasterECU.isoSPI2 <-> CMIC_Chain2.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  link isoSPIChain3: bus {
+    BMSMasterECU.isoSPI3 <-> CMIC_Chain3.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  node VCUGateway: gateway {
+    port canFD: electrical inout [protocol: "CAN-FD"]
+  }
+
+  node ChargerGateway: gateway {
+    port canFD: electrical inout [protocol: "CAN-FD"]
+  }
+
+  link VehicleCAN: bus {
+    BMSMasterECU.can1 <-> VCUGateway.canFD
+    [bandwidth: "5Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link ChargerCAN: bus {
+    BMSMasterECU.can2 <-> ChargerGateway.canFD
+    [bandwidth: "5Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link PackSensorAnalog: point_to_point {
+    HVVoltageSensor.analogOut <-> BMSMasterECU.adc1
+    HVCurrentSensor.analogOut <-> BMSMasterECU.adc2
+    IsolationMonitorIC.analogOut <-> BMSMasterECU.adc3
+  }
+
+  link ContactorDrive: point_to_point {
+    BMSMasterECU.hsd1 <-> MainContactorPos.coilIn
+    BMSMasterECU.hsd1 <-> MainContactorNeg.coilIn
+    BMSMasterECU.hsd2 <-> PrechargeRelay.coilIn
+  }
+
+  link CoolantPWM: point_to_point {
+    BMSMasterECU.pwm1 <-> CoolantPump.pwmIn
+    BMSMasterECU.pwm2 <-> CoolantValve.pwmIn
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Software Architecture (SW Layer)
+// -----------------------------------------------------------------------------
+
+software "BMS Software" {
+
+  // =========================================================================
+  // Service Interfaces
+  // =========================================================================
+
+  service ICellAcquisition {
+    operation getCellData(): ModuleArray
+    operation getCellStatistics(): CellStatistics
+    event cellDataUpdated: ModuleArray
+    error CMICCommunicationLost [code: 0x0100]
+    error CellSensorFault [code: 0x0101]
+  }
+
+  service IStateEstimation {
+    operation getSOC(): SOC
+    operation getSOH(): SOH
+    operation getPackState(): PackState
+    operation resetSOC(newSOC: in SOC): boolean
+    event socUpdated: SOC
+    error EstimationDiverged [code: 0x0200]
+  }
+
+  service IContactorControl {
+    operation closeContactors(): boolean
+    operation openContactors(): boolean
+    operation getContactorState(): ContactorCommand
+    event contactorStateChanged: ContactorCommand
+    error ContactorWelded [code: 0x0300]
+    error ContactorOpenFailed [code: 0x0301]
+  }
+
+  service ISafetySupervision {
+    operation getFaults(): FaultLog
+    operation clearFaults(): boolean
+    operation getIsolation(): IsolationMeasurement
+    event faultRaised: FaultEntry
+    event emergencyShutdown: boolean
+    error SafetyViolation [code: 0x0400]
+  }
+
+  service ICharging {
+    operation getChargeLimits(): ChargeLimits
+    operation setChargeRequest(req: in ChargeRequest): boolean
+    operation abortCharging(): boolean
+    event chargeLimitsUpdated: ChargeLimits
+    error ChargerCommunicationLost [code: 0x0500]
+  }
+
+  service IDiagnostic {
+    operation readDTC(): FaultLog
+    operation clearDTC(): boolean
+    operation readCellData(moduleId: in ModuleIndex): ModuleData
+    operation readPackState(): PackState
+    operation writeCalibration(key: in string, value: in float64): boolean
+  }
+
+  // =========================================================================
+  // SW Components — Drivers (BSW)
+  // =========================================================================
+
+  swcomponent CMICDriver: adapter {
+    port isoSPIRaw: flow required byte
+    port cellDataOut: flow provided ModuleArray
+    port cellStatsOut: flow provided CellStatistics
+    port balancingCmdIn: flow required ModuleArray
+    port cellService: service provided ICellAcquisition
+
+    behavior AcquireCells {
+      trigger: periodic "10ms"
+      budget: "4ms"
+      access: [isoSPIRaw: read, cellDataOut: write, cellStatsOut: write]
+    }
+
+    behavior ProcessBalancing {
+      trigger: periodic "100ms"
+      budget: "2ms"
+      access: [balancingCmdIn: read, isoSPIRaw: write]
+    }
+  }
+
+  swcomponent PackSensorDriver: adapter {
+    port adcRaw: flow required byte
+    port voltageOut: flow provided PackVoltage
+    port currentOut: flow provided PackCurrent
+    port isolationOut: flow provided IsolationMeasurement
+
+    behavior ReadPackSensors {
+      trigger: periodic "1ms"
+      budget: "0.3ms"
+      access: [adcRaw: read, voltageOut: write, currentOut: write]
+    }
+
+    behavior ReadIsolation {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [adcRaw: read, isolationOut: write]
+    }
+  }
+
+  swcomponent CoolantSensorDriver: adapter {
+    port adcRaw: flow required byte
+    port pulseRaw: flow required byte
+    port coolantTempOut: flow provided CoolantTemp
+    port coolantFlowOut: flow provided CoolantFlow
+
+    behavior ReadCoolant {
+      trigger: periodic "50ms"
+      budget: "2ms"
+      access: [adcRaw: read, pulseRaw: read, coolantTempOut: write, coolantFlowOut: write]
+    }
+  }
+
+  swcomponent ContactorDriver: adapter {
+    port gpioOut: flow provided byte
+    port contactorCmdIn: flow required ContactorCommand
+    port contactorService: service provided IContactorControl
+
+    behavior DriveContactors {
+      trigger: periodic "5ms"
+      budget: "0.5ms"
+      access: [contactorCmdIn: read, gpioOut: write]
+    }
+  }
+
+  swcomponent CoolantActuatorDriver: adapter {
+    port pwmOut: flow provided byte
+    port thermalCmdIn: flow required ThermalStatus
+
+    behavior DrivePWM {
+      trigger: periodic "20ms"
+      budget: "1ms"
+      access: [thermalCmdIn: read, pwmOut: write]
+    }
+  }
+
+  // =========================================================================
+  // SW Components — Application Layer
+  // =========================================================================
+
+  swcomponent StateEstimationApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port voltageIn: flow required PackVoltage [queued: true, queueLength: 20]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 20]
+    port socOut: flow provided SOC
+    port sohOut: flow provided SOH
+    port energyOut: flow provided Energy
+    port packStateOut: flow provided PackState
+    port stateService: service provided IStateEstimation
+
+    behavior CyclicSOC {
+      trigger: periodic "10ms"
+      budget: "3ms"
+      access: [voltageIn: read, currentIn: read, cellStatsIn: read, socOut: write]
+    }
+
+    behavior CyclicSOH {
+      trigger: periodic "1000ms"
+      budget: "50ms"
+      access: [cellDataIn: read, currentIn: read, socOut: read, sohOut: write]
+    }
+
+    behavior PublishState {
+      trigger: periodic "10ms"
+      budget: "1ms"
+      access: [socOut: read, sohOut: read, energyOut: write, packStateOut: write]
+    }
+  }
+
+  swcomponent LimitsApp: application {
+    port socIn: flow required SOC [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 5]
+    port limitsOut: flow provided ChargeLimits
+
+    behavior CalcLimits {
+      trigger: periodic "10ms"
+      budget: "2ms"
+      access: [socIn: read, cellStatsIn: read, currentIn: read, limitsOut: write]
+    }
+  }
+
+  swcomponent BalancingApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 2]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port balancingCmdOut: flow provided ModuleArray
+
+    behavior CyclicBalancing {
+      trigger: periodic "1000ms"
+      budget: "10ms"
+      access: [cellDataIn: read, cellStatsIn: read, balancingCmdOut: write]
+    }
+  }
+
+  swcomponent ThermalApp: application {
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port coolantTempIn: flow required CoolantTemp [queued: true, queueLength: 5]
+    port coolantFlowIn: flow required CoolantFlow [queued: true, queueLength: 5]
+    port thermalCmdOut: flow provided ThermalStatus
+
+    behavior CyclicThermal {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [cellStatsIn: read, coolantTempIn: read,
+               coolantFlowIn: read, thermalCmdOut: write]
+    }
+  }
+
+  swcomponent ChargingApp: application {
+    port socIn: flow required SOC [queued: true, queueLength: 5]
+    port limitsIn: flow required ChargeLimits [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port chargeRequestIn: flow required ChargeRequest [queued: true, queueLength: 2]
+    port chargeLimitsOut: flow provided ChargeLimits
+    port contactorCmdOut: flow provided ContactorCommand
+    port chargingService: service provided ICharging
+
+    behavior CyclicCharging {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [socIn: read, limitsIn: read, cellStatsIn: read,
+               chargeRequestIn: read, chargeLimitsOut: write]
+    }
+
+    behavior OnChargeRequest {
+      trigger: request ICharging.setChargeRequest
+    }
+
+    behavior OnAbortCharging {
+      trigger: request ICharging.abortCharging
+    }
+  }
+
+  swcomponent SafetyApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 2]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port voltageIn: flow required PackVoltage [queued: true, queueLength: 10]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 10]
+    port isolationIn: flow required IsolationMeasurement [queued: true, queueLength: 5]
+    port contactorCmdOut: flow provided ContactorCommand
+    port faultOut: flow provided FaultEntry
+    port safetyService: service provided ISafetySupervision
+    integrity: "ASIL_D"
+
+    behavior CyclicCellCheck {
+      trigger: periodic "5ms"
+      budget: "1ms"
+      access: [cellDataIn: read, cellStatsIn: read, faultOut: write]
+    }
+
+    behavior CyclicPackCheck {
+      trigger: periodic "1ms"
+      budget: "0.2ms"
+      access: [voltageIn: read, currentIn: read, faultOut: write,
+               contactorCmdOut: write]
+    }
+
+    behavior CyclicIsoCheck {
+      trigger: periodic "100ms"
+      budget: "2ms"
+      access: [isolationIn: read, faultOut: write]
+    }
+  }
+
+  swcomponent DiagnosticsApp: service {
+    port faultIn: flow required FaultEntry [queued: true, queueLength: 16]
+    port packStateIn: flow required PackState [queued: true, queueLength: 5]
+    port logOut: flow provided FaultLog
+    port diagService: service provided IDiagnostic
+
+    behavior StoreFaults {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [faultIn: read, logOut: write]
+    }
+
+    behavior OnReadDTC {
+      trigger: request IDiagnostic.readDTC
+    }
+
+    behavior OnClearDTC {
+      trigger: request IDiagnostic.clearDTC
+    }
+
+    behavior OnReadCellData {
+      trigger: request IDiagnostic.readCellData
+    }
+  }
+
+  swcomponent CANCommsApp: application {
+    port packStateIn: flow required PackState [queued: true, queueLength: 5]
+    port limitsIn: flow required ChargeLimits [queued: true, queueLength: 5]
+    port faultLogIn: flow required FaultLog [queued: true, queueLength: 2]
+    port chargeRequestOut: flow provided ChargeRequest
+    port canTxOut: flow provided byte
+    port canRxIn: flow required byte
+
+    behavior CyclicVCUReport {
+      trigger: periodic "10ms"
+      budget: "2ms"
+      access: [packStateIn: read, limitsIn: read, canTxOut: write]
+    }
+
+    behavior CyclicChargerComm {
+      trigger: periodic "100ms"
+      budget: "3ms"
+      access: [limitsIn: read, canRxIn: read, chargeRequestOut: write, canTxOut: write]
+    }
+  }
+
+  // =========================================================================
+  // SW Connectors
+  // =========================================================================
+
+  // Driver -> Application
+  connect CMICDriver.cellDataOut -> StateEstimationApp.cellDataIn : flow
+  connect CMICDriver.cellDataOut -> BalancingApp.cellDataIn : flow
+  connect CMICDriver.cellDataOut -> SafetyApp.cellDataIn : flow
+  connect CMICDriver.cellStatsOut -> StateEstimationApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> LimitsApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> BalancingApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> ThermalApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> ChargingApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> SafetyApp.cellStatsIn : flow
+  connect PackSensorDriver.voltageOut -> StateEstimationApp.voltageIn : flow
+  connect PackSensorDriver.voltageOut -> SafetyApp.voltageIn : flow
+  connect PackSensorDriver.currentOut -> StateEstimationApp.currentIn : flow
+  connect PackSensorDriver.currentOut -> LimitsApp.currentIn : flow
+  connect PackSensorDriver.currentOut -> SafetyApp.currentIn : flow
+  connect PackSensorDriver.isolationOut -> SafetyApp.isolationIn : flow
+  connect CoolantSensorDriver.coolantTempOut -> ThermalApp.coolantTempIn : flow
+  connect CoolantSensorDriver.coolantFlowOut -> ThermalApp.coolantFlowIn : flow
+
+  // Application -> Application
+  connect StateEstimationApp.socOut -> LimitsApp.socIn : flow
+  connect StateEstimationApp.socOut -> ChargingApp.socIn : flow
+  connect StateEstimationApp.packStateOut -> DiagnosticsApp.packStateIn : flow
+  connect StateEstimationApp.packStateOut -> CANCommsApp.packStateIn : flow
+  connect LimitsApp.limitsOut -> ChargingApp.limitsIn : flow
+  connect LimitsApp.limitsOut -> CANCommsApp.limitsIn : flow
+  connect SafetyApp.faultOut -> DiagnosticsApp.faultIn : flow
+  connect CANCommsApp.chargeRequestOut -> ChargingApp.chargeRequestIn : flow
+
+  // Application -> Driver
+  connect BalancingApp.balancingCmdOut -> CMICDriver.balancingCmdIn : flow
+  connect SafetyApp.contactorCmdOut -> ContactorDriver.contactorCmdIn : flow
+  connect ThermalApp.thermalCmdOut -> CoolantActuatorDriver.thermalCmdIn : flow
+  connect ChargingApp.contactorCmdOut -> ContactorDriver.contactorCmdIn : flow
+}
+
+// -----------------------------------------------------------------------------
+// Allocations (F -> L)
+// -----------------------------------------------------------------------------
+
+allocations {
+
+  // --- Sense functions -> Logical components ---
+
+  AcquireCellData -> CellMonitoringSubsystem [type: full]
+  AcquireCellData.MeasureCellVoltages -> CellMonitoringSubsystem.CellMonitorIC [type: full]
+  AcquireCellData.MeasureCellTemperatures -> CellMonitoringSubsystem.CellMonitorIC [type: full]
+  AcquireCellData.CalcCellStatistics -> CellMonitoringSubsystem.CellAggregator [type: full]
+
+  MeasurePackElectrical -> PackMeasurementSubsystem [type: full]
+  MeasureCoolant -> ThermalSubsystem [type: partial]
+
+  // --- Think functions -> BMSController sub-components ---
+
+  EstimateState -> BMSController [type: full]
+  EstimateState.EstimateSOC -> BMSController.StateEstimator [type: full]
+  EstimateState.EstimateSOH -> BMSController.StateEstimator [type: full]
+  EstimateState.CalcEnergy -> BMSController.StateEstimator [type: full]
+
+  ComputeLimits -> BMSController [type: full]
+  ComputeLimits.CalcCurrentLimits -> BMSController.LimitsCalculator [type: full]
+  ComputeLimits.DeratePower -> BMSController.LimitsCalculator [type: full]
+
+  ControlBalancing -> BMSController.BalancingController [type: full]
+  ControlBalancing.SelectCellsForBalancing -> BMSController.BalancingController [type: full]
+  ControlBalancing.CalcBalancingDuty -> BMSController.BalancingController [type: full]
+
+  ControlThermal -> BMSController.ThermalController [type: full]
+  ControlThermal.DetermineAction -> BMSController.ThermalController [type: full]
+  ControlThermal.CalcPumpValve -> BMSController.ThermalController [type: full]
+
+  ControlCharging -> BMSController.ChargingController [type: full]
+  ControlCharging.NegotiateChargePower -> BMSController.ChargingController [type: full]
+  ControlCharging.ControlPrecharge -> BMSController.ChargingController [type: partial]
+
+  SuperviseSafety -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckCellLimits -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckPackLimits -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckIsolation -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.DecideContactor -> BMSController.SafetyManager [type: full]
+
+  ManageDiagnostics -> BMSController.DiagnosticsController [type: full]
+
+  // --- Act functions -> Actuator subsystems ---
+
+  DriveContactors -> ContactorSubsystem [type: full]
+  DriveBalancing -> CellMonitoringSubsystem [type: partial]
+  DriveCoolant -> ThermalSubsystem [type: full]
+  ReportToVCU -> CommunicationSubsystem [type: full]
+
+  // --- Interface allocations ---
+
+  interface CellSensorInterface -> CellMonitoringSubsystem.cellData [mapping: direct]
+  interface PackSensorInterface -> PackMeasurementSubsystem.packVoltage [mapping: direct]
+  interface ContactorInterface -> ContactorSubsystem.contactorCmd [mapping: direct]
+  interface VCUInterface -> CommunicationSubsystem.canBusOut [mapping: direct]
+  interface ChargerInterface -> CommunicationSubsystem.chargerData [mapping: direct]
+
+  // --- Flow allocations ---
+
+  flow AcquireCellData.cellDataOut->EstimateState.cellDataIn
+    -> CellMonitoringSubsystem.cellData->BMSController.cellDataIn [type: direct]
+
+  flow AcquireCellData.cellDataOut->SuperviseSafety.cellDataIn
+    -> CellMonitoringSubsystem.cellData->BMSController.cellDataIn [type: direct]
+
+  flow MeasurePackElectrical.voltageOut->SuperviseSafety.voltageIn
+    -> PackMeasurementSubsystem.packVoltage->BMSController.packVoltageIn [type: direct]
+
+  flow SuperviseSafety.contactorCmdOut->DriveContactors.contactorCmdIn
+    -> BMSController.contactorCmdOut->ContactorSubsystem.contactorCmd [type: direct]
+}
+
+// -----------------------------------------------------------------------------
+// Realizations (L -> P)
+// -----------------------------------------------------------------------------
+
+realizations {
+
+  // --- Sensor subsystems -> Physical nodes ---
+
+  CellMonitoringSubsystem -> CMIC_Chain1 [type: hardware]
+  CellMonitoringSubsystem -> CMIC_Chain2 [type: hardware]
+  CellMonitoringSubsystem -> CMIC_Chain3 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain1 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain2 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain3 [type: hardware]
+  CellMonitoringSubsystem.CellAggregator -> BMSMasterECU [type: software]
+
+  PackMeasurementSubsystem -> HVVoltageSensor [type: hardware]
+  PackMeasurementSubsystem -> HVCurrentSensor [type: hardware]
+  PackMeasurementSubsystem.VoltageSensor -> HVVoltageSensor [type: hardware]
+  PackMeasurementSubsystem.CurrentSensor -> HVCurrentSensor [type: hardware]
+  PackMeasurementSubsystem.IsolationMonitor -> IsolationMonitorIC [type: hardware]
+
+  // --- BMS Controller -> Master ECU (all software) ---
+
+  BMSController -> BMSMasterECU [type: software]
+  BMSController.StateEstimator -> BMSMasterECU [type: software]
+  BMSController.LimitsCalculator -> BMSMasterECU [type: software]
+  BMSController.BalancingController -> BMSMasterECU [type: software]
+  BMSController.ThermalController -> BMSMasterECU [type: software]
+  BMSController.ChargingController -> BMSMasterECU [type: software]
+  BMSController.SafetyManager -> BMSMasterECU [type: software]
+  BMSController.DiagnosticsController -> BMSMasterECU [type: software]
+
+  // --- Actuator subsystems -> Physical actuators ---
+
+  ContactorSubsystem -> MainContactorPos [type: hardware]
+  ContactorSubsystem -> MainContactorNeg [type: hardware]
+  ContactorSubsystem -> PrechargeRelay [type: hardware]
+  ContactorSubsystem.MainContactor -> MainContactorPos [type: hardware]
+  ContactorSubsystem.MainContactor -> MainContactorNeg [type: hardware]
+  ContactorSubsystem.PrechargeContactor -> PrechargeRelay [type: hardware]
+
+  ThermalSubsystem -> CoolantPump [type: hardware]
+  ThermalSubsystem -> CoolantValve [type: hardware]
+  ThermalSubsystem.CoolantPump -> CoolantPump [type: hardware]
+  ThermalSubsystem.CoolantValve -> CoolantValve [type: hardware]
+
+  // --- Communication -> Master ECU ---
+
+  CommunicationSubsystem -> BMSMasterECU [type: software]
+}
+
+// -----------------------------------------------------------------------------
+// Trace Links
+// -----------------------------------------------------------------------------
+
+trace {
+
+  // =========================================================================
+  // Requirements -> Functional
+  // =========================================================================
+
+  BMS-001 satisfiedBy AcquireCellData.MeasureCellVoltages
+  BMS-002 satisfiedBy AcquireCellData.MeasureCellTemperatures
+  BMS-010 satisfiedBy EstimateState.EstimateSOC
+  BMS-011 satisfiedBy EstimateState.EstimateSOH
+  BMS-020 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-020 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-021 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-021 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-022 satisfiedBy SuperviseSafety.CheckPackLimits
+  BMS-022 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-023 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-024 satisfiedBy SuperviseSafety.CheckIsolation
+  BMS-030 satisfiedBy ControlThermal
+  BMS-031 satisfiedBy ControlThermal.DetermineAction
+  BMS-040 satisfiedBy ControlBalancing
+  BMS-050 satisfiedBy ControlCharging.NegotiateChargePower
+  BMS-051 satisfiedBy ControlCharging
+  BMS-060 satisfiedBy ManageDiagnostics
+  BMS-061 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-070 satisfiedBy ReportToVCU
+  BMS-071 satisfiedBy ManageDiagnostics
+
+  // =========================================================================
+  // Requirements -> Logical
+  // =========================================================================
+
+  BMS-001 satisfiedBy CellMonitoringSubsystem.CellMonitorIC
+  BMS-002 satisfiedBy CellMonitoringSubsystem.CellMonitorIC
+  BMS-010 satisfiedBy BMSController.StateEstimator
+  BMS-020 satisfiedBy BMSController.SafetyManager
+  BMS-021 satisfiedBy BMSController.SafetyManager
+  BMS-022 satisfiedBy BMSController.SafetyManager
+  BMS-024 satisfiedBy PackMeasurementSubsystem.IsolationMonitor
+  BMS-030 satisfiedBy ThermalSubsystem
+  BMS-040 satisfiedBy BMSController.BalancingController
+  BMS-050 satisfiedBy BMSController.ChargingController
+  BMS-061 satisfiedBy ContactorSubsystem
+
+  // =========================================================================
+  // Requirements -> Software
+  // =========================================================================
+
+  BMS-001 satisfiedBy CMICDriver
+  BMS-010 satisfiedBy StateEstimationApp
+  BMS-020 satisfiedBy SafetyApp
+  BMS-021 satisfiedBy SafetyApp
+  BMS-022 satisfiedBy SafetyApp
+  BMS-023 satisfiedBy SafetyApp
+  BMS-024 satisfiedBy SafetyApp
+  BMS-030 satisfiedBy ThermalApp
+  BMS-040 satisfiedBy BalancingApp
+  BMS-050 satisfiedBy ChargingApp
+  BMS-051 satisfiedBy ChargingApp
+  BMS-060 satisfiedBy DiagnosticsApp
+  BMS-070 satisfiedBy CANCommsApp
+  BMS-071 satisfiedBy DiagnosticsApp
+
+  // =========================================================================
+  // Implementation links
+  // =========================================================================
+
+  CMICDriver implements BMS-001
+  CMICDriver implements BMS-002
+  PackSensorDriver implements BMS-022
+  PackSensorDriver implements BMS-024
+  StateEstimationApp implements BMS-010
+  StateEstimationApp implements BMS-011
+  SafetyApp implements BMS-020
+  SafetyApp implements BMS-021
+  SafetyApp implements BMS-022
+  SafetyApp implements BMS-023
+  SafetyApp implements BMS-024
+  SafetyApp implements BMS-061
+  BalancingApp implements BMS-040
+  ThermalApp implements BMS-030
+  ThermalApp implements BMS-031
+  ChargingApp implements BMS-050
+  ChargingApp implements BMS-051
+  DiagnosticsApp implements BMS-060
+  DiagnosticsApp implements BMS-071
+  CANCommsApp implements BMS-070
+
+  // =========================================================================
+  // Verification links
+  // =========================================================================
+
+  SafetyApp verifies BMS-020
+  SafetyApp verifies BMS-021
+  SafetyApp verifies BMS-022
+  SafetyApp verifies BMS-023
+
+  // =========================================================================
+  // Derivation / refinement
+  // =========================================================================
+
+  BMS-061 derives BMS-020
+  BMS-061 derives BMS-021
+  BMS-023 derives BMS-002
+  BMS-031 derives BMS-030
+  BMS-071 derives BMS-060
+}
