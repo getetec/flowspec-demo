@@ -1,0 +1,586 @@
+// =============================================================================
+// Vehicle Speed Control System — Complete FlowSpec Example
+// =============================================================================
+// This example demonstrates all RFLP layers for a simplified vehicle speed
+// control system with cruise control and emergency braking.
+
+// -----------------------------------------------------------------------------
+// Project Metadata
+// -----------------------------------------------------------------------------
+
+project "Vehicle Speed Control" {
+  version: "1.0"
+}
+
+// -----------------------------------------------------------------------------
+// Schema — Data Type Definitions
+// -----------------------------------------------------------------------------
+
+schema {
+  // Constrained primitives
+  type Speed: float64 [unit: "km/h", range: 0..300]
+  type Percentage: float64 [range: 0..100]
+  type RPM: uint32 [unit: "rpm", range: 0..8000]
+  type Temperature: float64 [unit: "°C", range: -40..150]
+  type Timestamp: uint64 [unit: "ms"]
+
+  // Enumerations
+  type EngineState: enum { off, cranking, idle, running, error }
+  type BrakeMode: enum { normal, emergency, abs_active }
+  type CruiseState: enum { off, standby, active, override }
+
+  // Structures
+  type VehicleStatus: struct {
+    speed: Speed
+    rpm: RPM
+    engineState: EngineState
+    engineTemp: Temperature
+    timestamp: Timestamp
+  }
+
+  type CruiseSettings: struct {
+    targetSpeed: Speed
+    state: CruiseState
+  }
+
+  type BrakeCommand: struct {
+    pressure: Percentage
+    mode: BrakeMode
+  }
+
+  // Array type
+  type SpeedHistory: array<Speed> [size: 50]
+
+  // Physical types
+  type Voltage: physical float64 [unit: "V", range: 0..14.4]
+  type Current: physical float64 [unit: "A", range: 0..30]
+}
+
+// -----------------------------------------------------------------------------
+// Requirements (R Layer)
+// -----------------------------------------------------------------------------
+
+requirements "System Requirements" {
+  spec-type: system_spec
+
+  req SYS-001 "Cruise Control" {
+    type: functional
+    priority: must
+    statement: "The system shall maintain vehicle speed within ±2 km/h
+               of the driver-set target speed when cruise control is active."
+    category: "Speed Control"
+  }
+
+  req SYS-002 "Emergency Braking" {
+    type: functional
+    priority: must
+    statement: "The system shall initiate emergency braking within 50ms
+               of detecting an imminent collision."
+    integrity: "SIL_3"
+    quality {
+      metric: "response_time"
+      target: "50ms"
+      verification: "HIL test"
+    }
+  }
+
+  req SYS-003 "Speed Monitoring" {
+    type: functional
+    priority: must
+    statement: "The system shall continuously read vehicle speed at a
+               minimum rate of 100 Hz."
+  }
+
+  req SYS-004 "Diagnostics Logging" {
+    type: non_functional
+    priority: should
+    statement: "The system shall log all sensor failures and actuator
+               faults with timestamps."
+  }
+
+  req SYS-005 "Graceful Degradation" {
+    type: non_functional
+    priority: must
+    statement: "On sensor failure the system shall disable cruise control
+               and alert the driver within 200ms."
+    integrity: "SIL_2"
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Functional Architecture (F Layer)
+// -----------------------------------------------------------------------------
+
+functional "Vehicle Control Functions" {
+
+  // --- Sense ---
+
+  function ReadSensors: source {
+    port speedOut: out Speed
+    port rpmOut: out RPM
+    port statusOut: out VehicleStatus
+
+    tags: [real-time, safety-relevant]
+  }
+
+  function ReadDriverInput: source {
+    port cruiseSettingsOut: out CruiseSettings
+    port brakeRequestOut: out Percentage
+  }
+
+  function DetectObstacle: source {
+    port obstacleDistOut: out float64
+    integrity: "SIL_3"
+  }
+
+  // --- Think ---
+
+  function ComputeControl: transform {
+    port speedIn: in Speed
+    port rpmIn: in RPM
+    port cruiseIn: in CruiseSettings
+    port obstacleIn: in float64
+    port throttleOut: out Percentage
+    port brakeOut: out BrakeCommand
+
+    integrity: "SIL_2"
+
+    // Sub-functions
+    function CalcCruise: transform {
+      port speedIn: in Speed
+      port settingsIn: in CruiseSettings
+      port throttleOut: out Percentage
+    }
+
+    function CalcEmergencyBrake: transform {
+      port speedIn: in Speed
+      port distanceIn: in float64
+      port brakeOut: out BrakeCommand
+      integrity: "SIL_3"
+    }
+
+    function ArbiterOutput: control {
+      port cruiseThrottle: in Percentage
+      port emergencyBrake: in BrakeCommand
+      port throttleOut: out Percentage
+      port brakeOut: out BrakeCommand
+    }
+
+    // Internal flows
+    flow CalcCruise.throttleOut -> ArbiterOutput.cruiseThrottle
+    flow CalcEmergencyBrake.brakeOut -> ArbiterOutput.emergencyBrake
+  }
+
+  function MonitorHealth: transform {
+    port statusIn: in VehicleStatus
+    port diagOut: out string
+  }
+
+  // --- Act ---
+
+  function ApplyThrottle: sink {
+    port throttleIn: in Percentage
+  }
+
+  function ApplyBrake: sink {
+    port brakeIn: in BrakeCommand
+    integrity: "SIL_3"
+  }
+
+  // --- Top-level flows ---
+
+  flow ReadSensors.speedOut -> ComputeControl.speedIn
+  flow ReadSensors.rpmOut -> ComputeControl.rpmIn
+  flow ReadSensors.statusOut -> MonitorHealth.statusIn
+  flow ReadDriverInput.cruiseSettingsOut -> ComputeControl.cruiseIn
+  flow DetectObstacle.obstacleDistOut -> ComputeControl.obstacleIn
+  flow ComputeControl.throttleOut -> ApplyThrottle.throttleIn
+  flow ComputeControl.brakeOut -> ApplyBrake.brakeIn
+
+  // --- Interfaces ---
+
+  interface VehicleSensors {
+    provided speed: Speed
+    provided rpm: RPM
+    provided status: VehicleStatus
+  }
+
+  interface DriverControls {
+    provided cruiseSettings: CruiseSettings
+    provided brakeRequest: Percentage
+  }
+
+  interface CollisionSensor {
+    provided distance: float64
+  }
+
+  interface ActuatorOutputs {
+    required throttle: Percentage
+    required brake: BrakeCommand
+  }
+
+  // --- External actors ---
+
+  actor Driver: human {
+    interfaces: [DriverControls]
+  }
+
+  actor Vehicle: environment {
+    interfaces: [VehicleSensors, ActuatorOutputs]
+  }
+
+  actor Obstacle: environment {
+    interfaces: [CollisionSensor]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Logical Architecture (L Layer)
+// -----------------------------------------------------------------------------
+
+logical "Vehicle Control Architecture" {
+
+  component SensorSubsystem: subsystem {
+    port sensorData: flow provided
+    port obstacleData: flow provided
+    port diagnostics: service provided
+  }
+
+  component ControlSubsystem: subsystem {
+    port sensorIn: flow required
+    port driverIn: flow required
+    port obstacleIn: flow required
+    port actuatorCmd: flow provided
+    port config: property provided
+
+    integrity: "SIL_2"
+
+    component CruiseController: block {
+      port speedIn: flow required
+      port settingsIn: flow required
+      port throttleOut: flow provided
+    }
+
+    component EmergencyBrakeController: block {
+      port speedIn: flow required
+      port distanceIn: flow required
+      port brakeOut: flow provided
+      integrity: "SIL_3"
+    }
+
+    component OutputArbiter: block {
+      port cruiseIn: flow required
+      port brakeIn: flow required
+      port cmdOut: flow provided
+    }
+
+    // Internal connections
+    connect sensorIn -> CruiseController.speedIn : flow
+    connect sensorIn -> EmergencyBrakeController.speedIn : flow
+    connect driverIn -> CruiseController.settingsIn : delegation
+    connect obstacleIn -> EmergencyBrakeController.distanceIn : delegation
+    connect CruiseController.throttleOut -> OutputArbiter.cruiseIn : flow
+    connect EmergencyBrakeController.brakeOut -> OutputArbiter.brakeIn : flow
+    connect OutputArbiter.cmdOut -> actuatorCmd : delegation
+  }
+
+  component ActuatorSubsystem: subsystem {
+    port command: flow required
+  }
+
+  component DiagnosticsSubsystem: subsystem {
+    port healthIn: flow required
+    port logOut: service provided
+  }
+
+  component HMI: module {
+    port driverInput: flow provided
+    port displayData: flow required
+  }
+
+  // Top-level connections
+  connect SensorSubsystem.sensorData -> ControlSubsystem.sensorIn
+  connect SensorSubsystem.obstacleData -> ControlSubsystem.obstacleIn
+  connect HMI.driverInput -> ControlSubsystem.driverIn
+  connect ControlSubsystem.actuatorCmd -> ActuatorSubsystem.command
+  connect SensorSubsystem.diagnostics -> DiagnosticsSubsystem.healthIn
+
+  // Logical interface
+  interface ISensorData {
+    ports: [SensorSubsystem.sensorData, ControlSubsystem.sensorIn]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Physical Architecture (P Layer)
+// -----------------------------------------------------------------------------
+
+physical "Vehicle Hardware" {
+
+  node MainECU: processing_unit {
+    port can1: electrical inout [protocol: "CAN-FD"]
+    port can2: electrical inout [protocol: "CAN-FD"]
+    port eth0: electrical inout [protocol: "100BASE-T1"]
+    resources {
+      cpu: "ARM Cortex-R52 @800MHz"
+      memory: "1MB SRAM"
+      storage: "4MB Flash"
+    }
+    integrity: "SIL_3"
+  }
+
+  node RadarUnit: sensor {
+    port can1: electrical out [protocol: "CAN-FD"]
+    resources {
+      cpu: "DSP @200MHz"
+      memory: "256KB SRAM"
+    }
+  }
+
+  node WheelSpeedSensor: sensor {
+    port can1: electrical out [protocol: "CAN-FD"]
+  }
+
+  node ThrottleActuator: actuator {
+    port can1: electrical in [protocol: "CAN-FD"]
+  }
+
+  node BrakeActuator: actuator {
+    port can1: electrical in [protocol: "CAN-FD"]
+    integrity: "SIL_3"
+  }
+
+  node DisplayUnit: processing_unit {
+    port eth0: electrical inout [protocol: "100BASE-T1"]
+    port can1: electrical inout [protocol: "CAN-FD"]
+    resources {
+      cpu: "ARM Cortex-A53 @1GHz"
+      memory: "512MB DDR"
+      storage: "8GB eMMC"
+    }
+  }
+
+  // Physical links
+  link SensorBus: bus {
+    WheelSpeedSensor.can1 <-> MainECU.can1
+    RadarUnit.can1 <-> MainECU.can1
+    [bandwidth: "2Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link ActuatorBus: bus {
+    MainECU.can2 <-> ThrottleActuator.can1
+    MainECU.can2 <-> BrakeActuator.can1
+    [bandwidth: "2Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link DiagLink: network {
+    MainECU.eth0 <-> DisplayUnit.eth0
+    [bandwidth: "100Mbit/s", protocol: "100BASE-T1"]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Software Architecture (SW Layer)
+// -----------------------------------------------------------------------------
+
+software "Control Software" {
+
+  // --- Service interfaces ---
+
+  service ICruiseControl {
+    operation getTargetSpeed(): Speed
+    operation setTargetSpeed(target: in Speed): boolean
+    operation activate(): boolean
+    operation deactivate(): boolean
+    event cruiseStateChanged: CruiseState
+    error SensorUnavailable [code: 0x10]
+    error SpeedOutOfRange [code: 0x11]
+  }
+
+  service IDiagnostics {
+    operation getStatus(): VehicleStatus
+    operation clearFaults(): boolean
+    event faultDetected: string
+  }
+
+  // --- SW Components ---
+
+  swcomponent SensorDriver: adapter {
+    port rawCAN: flow required byte
+    port speedOut: flow provided Speed
+    port rpmOut: flow provided RPM
+    port statusOut: flow provided VehicleStatus
+
+    behavior ReadCAN {
+      trigger: periodic "5ms"
+      budget: "1ms"
+      access: [rawCAN: read, speedOut: write, rpmOut: write, statusOut: write]
+    }
+  }
+
+  swcomponent RadarDriver: adapter {
+    port rawCAN: flow required byte
+    port distanceOut: flow provided float64
+
+    behavior ReadRadar {
+      trigger: periodic "10ms"
+      budget: "3ms"
+      access: [rawCAN: read, distanceOut: write]
+    }
+  }
+
+  swcomponent CruiseControlApp: application {
+    port speedIn: flow required Speed [queued: true, queueLength: 10]
+    port settingsIn: flow required CruiseSettings
+    port throttleOut: flow provided Percentage
+    port cruiseService: service provided ICruiseControl
+
+    behavior CyclicCruise {
+      trigger: periodic "10ms"
+      budget: "3ms"
+      access: [speedIn: read, settingsIn: read, throttleOut: write]
+    }
+
+    behavior OnActivate {
+      trigger: request ICruiseControl.activate
+    }
+
+    behavior OnDeactivate {
+      trigger: request ICruiseControl.deactivate
+    }
+  }
+
+  swcomponent EmergencyBrakeApp: application {
+    port speedIn: flow required Speed [queued: true, queueLength: 5]
+    port distanceIn: flow required float64 [queued: true, queueLength: 5]
+    port brakeOut: flow provided BrakeCommand
+
+    behavior MonitorCollision {
+      trigger: periodic "5ms"
+      budget: "2ms"
+      access: [speedIn: read, distanceIn: read, brakeOut: write]
+    }
+  }
+
+  swcomponent OutputArbiterApp: application {
+    port cruiseThrottle: flow required Percentage
+    port emergencyBrake: flow required BrakeCommand
+    port driverBrake: flow required Percentage
+    port throttleCmd: flow provided Percentage
+    port brakeCmd: flow provided BrakeCommand
+
+    behavior Arbitrate {
+      trigger: periodic "5ms"
+      budget: "1ms"
+      access: [cruiseThrottle: read, emergencyBrake: read,
+               driverBrake: read, throttleCmd: write, brakeCmd: write]
+    }
+  }
+
+  swcomponent DiagnosticsManager: service {
+    port statusIn: flow required VehicleStatus
+    port diagService: service provided IDiagnostics
+    port logOut: flow provided string
+
+    behavior CheckHealth {
+      trigger: periodic "100ms"
+      budget: "10ms"
+      access: [statusIn: read, logOut: write]
+    }
+  }
+
+  // --- Connectors ---
+
+  connect SensorDriver.speedOut -> CruiseControlApp.speedIn : flow
+  connect SensorDriver.speedOut -> EmergencyBrakeApp.speedIn : flow
+  connect RadarDriver.distanceOut -> EmergencyBrakeApp.distanceIn : flow
+  connect CruiseControlApp.throttleOut -> OutputArbiterApp.cruiseThrottle : flow
+  connect EmergencyBrakeApp.brakeOut -> OutputArbiterApp.emergencyBrake : flow
+  connect SensorDriver.statusOut -> DiagnosticsManager.statusIn : flow
+}
+
+// -----------------------------------------------------------------------------
+// Allocations (F -> L)
+// -----------------------------------------------------------------------------
+
+allocations {
+  // Function -> Logical component
+  ReadSensors -> SensorSubsystem [type: full]
+  DetectObstacle -> SensorSubsystem [type: full]
+  ReadDriverInput -> HMI [type: full]
+  ComputeControl -> ControlSubsystem [type: full]
+  ComputeControl.CalcCruise -> ControlSubsystem.CruiseController [type: full]
+  ComputeControl.CalcEmergencyBrake -> ControlSubsystem.EmergencyBrakeController [type: full]
+  ComputeControl.ArbiterOutput -> ControlSubsystem.OutputArbiter [type: full]
+  ApplyThrottle -> ActuatorSubsystem [type: partial]
+  ApplyBrake -> ActuatorSubsystem [type: partial]
+  MonitorHealth -> DiagnosticsSubsystem [type: full]
+
+  // Interface allocations
+  interface VehicleSensors -> SensorSubsystem.sensorData [mapping: direct]
+  interface CollisionSensor -> SensorSubsystem.obstacleData [mapping: direct]
+  interface DriverControls -> HMI.driverInput [mapping: direct]
+  interface ActuatorOutputs -> ActuatorSubsystem.command [mapping: direct]
+
+  // Flow allocations
+  flow ReadSensors.speedOut->ComputeControl.speedIn
+    -> SensorSubsystem.sensorData->ControlSubsystem.sensorIn [type: direct]
+  flow DetectObstacle.obstacleDistOut->ComputeControl.obstacleIn
+    -> SensorSubsystem.obstacleData->ControlSubsystem.obstacleIn [type: direct]
+  flow ComputeControl.throttleOut->ApplyThrottle.throttleIn
+    -> ControlSubsystem.actuatorCmd->ActuatorSubsystem.command [type: direct]
+}
+
+// -----------------------------------------------------------------------------
+// Realizations (L -> P)
+// -----------------------------------------------------------------------------
+
+realizations {
+  SensorSubsystem -> WheelSpeedSensor [type: hardware]
+  SensorSubsystem -> RadarUnit [type: hardware]
+  ControlSubsystem -> MainECU [type: software]
+  ControlSubsystem.CruiseController -> MainECU [type: software]
+  ControlSubsystem.EmergencyBrakeController -> MainECU [type: software]
+  ControlSubsystem.OutputArbiter -> MainECU [type: software]
+  ActuatorSubsystem -> ThrottleActuator [type: hardware]
+  ActuatorSubsystem -> BrakeActuator [type: hardware]
+  DiagnosticsSubsystem -> MainECU [type: software]
+  HMI -> DisplayUnit [type: mixed]
+}
+
+// -----------------------------------------------------------------------------
+// Trace Links
+// -----------------------------------------------------------------------------
+
+trace {
+  // Requirements -> Functions
+  SYS-001 satisfiedBy ComputeControl.CalcCruise
+  SYS-002 satisfiedBy ComputeControl.CalcEmergencyBrake
+  SYS-003 satisfiedBy ReadSensors
+  SYS-004 satisfiedBy MonitorHealth
+  SYS-005 satisfiedBy MonitorHealth
+
+  // Requirements -> Logical components
+  SYS-001 satisfiedBy ControlSubsystem.CruiseController
+  SYS-002 satisfiedBy ControlSubsystem.EmergencyBrakeController
+  SYS-004 satisfiedBy DiagnosticsSubsystem
+
+  // Requirements -> SW components
+  SYS-001 satisfiedBy CruiseControlApp
+  SYS-002 satisfiedBy EmergencyBrakeApp
+  SYS-003 satisfiedBy SensorDriver
+  SYS-004 satisfiedBy DiagnosticsManager
+
+  // Implementation links
+  ReadSensors implements SYS-003
+  CruiseControlApp implements SYS-001
+  EmergencyBrakeApp implements SYS-002
+  DiagnosticsManager implements SYS-004
+
+  // Verification
+  EmergencyBrakeApp verifies SYS-002
+  DiagnosticsManager verifies SYS-004
+
+  // Derivation
+  SYS-005 derives SYS-004
+}
