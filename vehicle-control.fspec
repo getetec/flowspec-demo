@@ -28,6 +28,8 @@ schema {
   type EngineState: enum { off, cranking, idle, running, error }
   type BrakeMode: enum { normal, emergency, abs_active }
   type CruiseState: enum { off, standby, active, override }
+  type CruiseState1: enum { off, standby, active, override }  
+  type CruiseState2: enum { off, standby, active, override }
 
   // Structures
   type VehicleStatus: struct {

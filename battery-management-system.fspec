@@ -30,6 +30,7 @@ schema {
   type Resistance: physical float64 [unit: "mΩ", range: 0..500]
   type Energy: physical float64 [unit: "kWh", range: 0..100]
   type Power: physical float64 [unit: "kW", range: -150..250]
+  type Power1: physical float64 [unit: "kW", range: -150..250]
 
   // --- Thermal primitives ---
 
