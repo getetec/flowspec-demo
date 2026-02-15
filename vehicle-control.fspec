@@ -586,3 +586,33 @@ trace {
   // Derivation
   SYS-005 derives SYS-004
 }
+
+// =============================================================================
+// Views — Filtered diagram perspectives
+// =============================================================================
+
+// Cruise control regulation loop: sensors → control → throttle
+view "Cruise Control Loop" {
+  type: custom
+  layer: functional
+  include: [ReadSensors, ReadDriverInput, ComputeControl, ApplyThrottle]
+  ports: connected
+}
+
+// Emergency braking chain: obstacle detection → control → brake
+view "Emergency Braking" {
+  type: custom
+  layer: functional
+  include: [ReadSensors, DetectObstacle, ComputeControl, ApplyBrake]
+  ports: connected
+}
+
+// Health monitoring context: MonitorHealth + all direct neighbors
+view "Health Monitoring" {
+  type: context
+  layer: functional
+  focus: MonitorHealth
+  depth: 1
+  direction: both
+  ports: connected
+}

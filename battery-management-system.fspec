@@ -1755,3 +1755,43 @@ trace {
   BMS-031 derives BMS-030
   BMS-071 derives BMS-060
 }
+
+// =============================================================================
+// Views — Filtered diagram perspectives
+// =============================================================================
+
+// Safety-critical chain: sensors → supervision → contactors (ASIL C/D)
+view "Safety Chain" {
+  type: custom
+  layer: functional
+  include: [MeasurePackElectrical, AcquireCellData, SuperviseSafety, ComputeLimits, DriveContactors]
+  ports: connected
+}
+
+// Thermal management context: ControlThermal + direct neighbors
+view "Thermal Management" {
+  type: context
+  layer: functional
+  focus: ControlThermal
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// State estimation chain: measurement → estimation → limit computation
+view "SOC/SOH Estimation" {
+  type: custom
+  layer: functional
+  include: [AcquireCellData, MeasurePackElectrical, EstimateState, ComputeLimits]
+  ports: connected
+}
+
+// Charging control context: ControlCharging + all suppliers and consumers
+view "Charging Control" {
+  type: context
+  layer: functional
+  focus: ControlCharging
+  depth: 1
+  direction: both
+  ports: connected
+}
