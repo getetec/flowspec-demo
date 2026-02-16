@@ -1795,3 +1795,41 @@ view "Charging Control" {
   direction: both
   ports: connected
 }
+
+// Logical views — filter the logical diagram
+
+// Safety-critical path: sensors → controller → contactors
+view "Safety Path" {
+  type: custom
+  layer: logical
+  include: [PackMeasurementSubsystem, CellMonitoringSubsystem, BMSController, ContactorSubsystem]
+  ports: connected
+}
+
+// Thermal management context
+view "Thermal Context" {
+  type: context
+  layer: logical
+  focus: ThermalSubsystem
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// Physical views — filter the physical diagram
+
+// isoSPI sensor network: CMICs → Master ECU
+view "Cell Sensor Network" {
+  type: custom
+  layer: physical
+  include: [BMSMasterECU, CMIC_Chain1, CMIC_Chain2, CMIC_Chain3]
+}
+
+// Master ECU + all connected nodes
+view "Master ECU Context" {
+  type: context
+  layer: physical
+  focus: BMSMasterECU
+  depth: 1
+  direction: both
+}

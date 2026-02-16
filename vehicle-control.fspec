@@ -616,3 +616,41 @@ view "Health Monitoring" {
   direction: both
   ports: connected
 }
+
+// Logical views — filter the logical diagram
+
+// Data flow path: sensors → control → actuators
+view "Control Path" {
+  type: custom
+  layer: logical
+  include: [SensorSubsystem, ControlSubsystem, ActuatorSubsystem]
+  ports: connected
+}
+
+// ControlSubsystem + all direct neighbors
+view "Control Context" {
+  type: context
+  layer: logical
+  focus: ControlSubsystem
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// Physical views — filter the physical diagram
+
+// Sensor bus network: wheel speed + radar → MainECU
+view "Sensor Network" {
+  type: custom
+  layer: physical
+  include: [WheelSpeedSensor, RadarUnit, MainECU]
+}
+
+// MainECU + all connected nodes
+view "MainECU Context" {
+  type: context
+  layer: physical
+  focus: MainECU
+  depth: 1
+  direction: both
+}
