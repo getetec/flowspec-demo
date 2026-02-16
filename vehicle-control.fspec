@@ -105,6 +105,13 @@ requirements "System Requirements" {
                and alert the driver within 200ms."
     integrity: "SIL_2"
   }
+
+  req SYS-006 "Test Requirement" {
+    type: non_functional
+    priority: must
+    statement: "requirement textual description"
+    integrity: "SIL_2"
+  }
 }
 
 // -----------------------------------------------------------------------------
