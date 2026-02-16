@@ -28,8 +28,6 @@ schema {
   type EngineState: enum { off, cranking, idle, running, error }
   type BrakeMode: enum { normal, emergency, abs_active }
   type CruiseState: enum { off, standby, active, override }
-  type CruiseState1: enum { off, standby, active, override }  
-  type CruiseState2: enum { off, standby, active, override }
 
   // Structures
   type VehicleStatus: struct {
@@ -105,6 +103,13 @@ requirements "System Requirements" {
     priority: must
     statement: "On sensor failure the system shall disable cruise control
                and alert the driver within 200ms."
+    integrity: "SIL_2"
+  }
+
+  req SYS-006 "Test Requirement" {
+    type: non_functional
+    priority: must
+    statement: "requirement textual description"
     integrity: "SIL_2"
   }
 }
@@ -585,4 +590,32 @@ trace {
 
   // Derivation
   SYS-005 derives SYS-004
+}
+
+// -----------------------------------------------------------------------------
+// Views
+// -----------------------------------------------------------------------------
+
+// Chain: Cruise Control Requirement durch alle RFLP-Layer
+// SYS-001 → CalcCruise → CruiseController → MainECU
+view "Cruise Control Chain" {
+  type: chain
+  start: SYS-001
+  direction: forward
+}
+
+// Chain: Emergency Brake bidirektional
+// SYS-002 ↔ CalcEmergencyBrake ↔ EmergencyBrakeController ↔ MainECU
+view "Emergency Brake Chain" {
+  type: chain
+  start: SYS-002
+  direction: both
+}
+
+// Chain: Von MainECU rückwärts — zeigt alle Funktionen und Requirements
+// die auf der MainECU landen
+view "MainECU Traceability" {
+  type: chain
+  start: MainECU
+  direction: backward
 }
