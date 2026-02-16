@@ -1301,6 +1301,17 @@ physical "BMS Hardware" {
     }
   }
 
+
+    node CMIC_Chain1b: sensor {
+    // Modules 0..8 (9 CMICs daisy-chained)
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+   
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
   node CMIC_Chain2: sensor {
     // Modules 9..17
     port isoSPI: electrical inout [protocol: "isoSPI"]
