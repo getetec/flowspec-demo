@@ -30,7 +30,6 @@ schema {
   type Resistance: physical float64 [unit: "mΩ", range: 0..500]
   type Energy: physical float64 [unit: "kWh", range: 0..100]
   type Power: physical float64 [unit: "kW", range: -150..250]
-  type Power1: physical float64 [unit: "kW", range: -150..250]
 
   // --- Thermal primitives ---
 
@@ -350,6 +349,58 @@ requirements "BMS System Requirements" {
     statement: "The BMS shall support UDS-based diagnostic access for
                reading cell data, fault memory, and calibration parameters."
   }
+
+  // --- Power state management ---
+
+  req BMS-080 "Power State Management" {
+    type: functional
+    priority: must
+    statement: "The BMS shall implement a deterministic state machine with
+               defined transitions (INIT → STANDBY → PRECHARGE → DRIVE → CHARGE →
+               SHUTDOWN → FAULT) and report current state to VCU at 100 Hz."
+    integrity: "ASIL_C"
+  }
+
+  req BMS-081 "Safe Shutdown" {
+    type: functional
+    priority: must
+    statement: "The BMS shall execute a safe shutdown sequence (open contactors,
+               disable balancing, store fault log) within 100 ms upon receiving
+               a critical fault or external shutdown request."
+    integrity: "ASIL_D"
+  }
+
+  // --- Insulation monitoring ---
+
+  req BMS-090 "Continuous Insulation Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall continuously monitor HV-to-chassis isolation
+               resistance with a dedicated measurement circuit, independent
+               of the pack voltage measurement path."
+    integrity: "ASIL_C"
+  }
+
+  // --- Data logging ---
+
+  req BMS-100 "Data Logging" {
+    type: non_functional
+    priority: must
+    statement: "The BMS shall log cell voltage/temperature snapshots every 10 s
+               (72 h rolling buffer) and store at least 1000 fault events with
+               timestamps in persistent non-volatile memory."
+  }
+
+  // --- Self-test ---
+
+  req BMS-110 "Power-on Self-Test" {
+    type: functional
+    priority: must
+    statement: "The BMS shall perform a power-on self-test validating sensor
+               chain integrity, actuator response, and communication links
+               within 2 s before transitioning to STANDBY."
+    integrity: "ASIL_B"
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -576,6 +627,116 @@ functional "BMS Functions" {
     port udsResponseOut: out string
   }
 
+  // --- Power State Management ---
+
+  function ManagePowerState: control {
+    port contactorStatusIn: in ContactorState
+    port faultIn: in FaultEntry
+    port selfTestIn: in Percentage
+    port wakeupIn: in BMSState
+    port systemStateOut: out BMSState
+    port prechargeCmdOut: out ContactorCommand
+    port shutdownCmdOut: out ContactorCommand
+    integrity: "ASIL_C"
+
+    function RunPrechargeSequence: control {
+      port contactorStatusIn: in ContactorState
+      port prechargeCmdOut: out ContactorCommand
+    }
+
+    function CoordinateShutdown: control {
+      port faultLevelIn: in FaultSeverity
+      port shutdownCmdOut: out ContactorCommand
+      integrity: "ASIL_D"
+    }
+
+    function TransitionDriveMode: transform {
+      port currentStateIn: in BMSState
+      port faultLevelIn: in FaultSeverity
+      port selfTestIn: in Percentage
+      port nextStateOut: out BMSState
+    }
+  }
+
+  // --- Insulation Monitoring (dedicated, independent of pack sensor) ---
+
+  function MonitorInsulation: transform {
+    port rawIsolationIn: in Resistance
+    port isolationStatusOut: out IsolationStatus
+    port isolationFaultOut: out FaultEntry
+    integrity: "ASIL_C"
+
+    function MeasureIsolationResistance: transform {
+      port rawIn: in Resistance
+      port measuredOut: out Resistance
+    }
+
+    function EvaluateIsolationStatus: transform {
+      port measuredIn: in Resistance
+      port statusOut: out IsolationStatus
+      port faultOut: out FaultSeverity
+    }
+
+    flow MeasureIsolationResistance.measuredOut -> EvaluateIsolationStatus.measuredIn
+  }
+
+  // --- Data Logging (black-box recorder) ---
+
+  function LogData: sink {
+    port cellDataLogIn: in ModuleArray
+    port packStateLogIn: in PackState
+    port faultLogIn: in FaultLog
+
+    function RecordCellHistory: sink {
+      port cellDataIn: in ModuleArray
+    }
+
+    function StoreEventLog: sink {
+      port faultIn: in FaultEntry
+      port packStateIn: in PackState
+    }
+  }
+
+  // --- Wake-up Coordination ---
+
+  function CoordinateWakeup: control {
+    port canWakeupIn: in Timestamp
+    port timerTriggerIn: in Timestamp
+    port powerEnableOut: out BMSState
+
+    function DetectWakeupSource: transform {
+      port canIn: in Timestamp
+      port timerIn: in Timestamp
+      port sourceOut: out BMSState
+    }
+
+    function ManageSleepTransition: control {
+      port sourceIn: in BMSState
+      port enableOut: out BMSState
+    }
+
+    flow DetectWakeupSource.sourceOut -> ManageSleepTransition.sourceIn
+  }
+
+  // --- Power-on Self-Test ---
+
+  function PerformSelfTest: transform {
+    port sensorHealthIn: in Percentage
+    port actuatorHealthIn: in Percentage
+    port selfTestResultOut: out Percentage
+    integrity: "ASIL_B"
+
+    function TestSensorChain: transform {
+      port sensorIn: in Percentage
+      port resultOut: out Percentage
+    }
+
+    function TestActuatorChain: transform {
+      port actuatorIn: in Percentage
+      port resultOut: out Percentage
+    }
+  }
+
   // =========================================================================
   // Act — Output functions
   // =========================================================================
@@ -597,6 +758,7 @@ functional "BMS Functions" {
     port packStateIn: in PackState
     port limitsIn: in ChargeLimits
     port faultLogIn: in FaultLog
+    port systemStateIn: in BMSState
   }
 
   // =========================================================================
@@ -629,12 +791,25 @@ functional "BMS Functions" {
   flow EstimateState.socOut -> ControlCharging.socIn
   flow ComputeLimits.limitsOut -> ControlCharging.limitsIn
 
+  // Think -> Think (new functions)
+  flow SuperviseSafety.faultOut -> ManagePowerState.faultIn
+  flow CoordinateWakeup.powerEnableOut -> ManagePowerState.wakeupIn
+  flow PerformSelfTest.selfTestResultOut -> ManagePowerState.selfTestIn
+  flow MonitorInsulation.isolationFaultOut -> ManageDiagnostics.faultIn
+
   // Think -> Act
   flow SuperviseSafety.contactorCmdOut -> DriveContactors.contactorCmdIn
+  flow ManagePowerState.prechargeCmdOut -> DriveContactors.contactorCmdIn
+  flow ManagePowerState.shutdownCmdOut -> DriveContactors.contactorCmdIn
   flow ControlBalancing.balancingCmdOut -> DriveBalancing.balancingCmdIn
   flow ControlThermal.thermalStatusOut -> DriveCoolant.thermalStatusIn
   flow SuperviseSafety.faultOut -> ManageDiagnostics.faultIn
   flow ControlCharging.chargeLimitsOut -> ReportToVCU.limitsIn
+  flow ManagePowerState.systemStateOut -> ReportToVCU.systemStateIn
+
+  // Think -> Sink (logging)
+  flow AcquireCellData.cellDataOut -> LogData.cellDataLogIn
+  flow ManageDiagnostics.logOut -> LogData.faultLogIn
 
   // =========================================================================
   // Interfaces and actors
@@ -791,6 +966,7 @@ logical "BMS Architecture" {
     port thermalCmdOut: flow provided
     port chargeLimitsOut: flow provided
     port vcuReportOut: flow provided
+    port faultAlertOut: flow provided
     port faultLogOut: service provided
     port diagPort: service bidirectional
 
@@ -855,24 +1031,24 @@ logical "BMS Architecture" {
 
     // --- Internal connections ---
 
-    // Sensor data distribution
-    connect cellDataIn -> StateEstimator.cellDataIn : flow
-    connect cellDataIn -> BalancingController.cellDataIn : flow
-    connect cellDataIn -> SafetyManager.cellDataIn : flow
-    connect cellStatsIn -> StateEstimator.cellStatsIn : flow
-    connect cellStatsIn -> LimitsCalculator.cellStatsIn : flow
-    connect cellStatsIn -> BalancingController.cellStatsIn : flow
-    connect cellStatsIn -> ThermalController.cellStatsIn : flow
-    connect cellStatsIn -> ChargingController.cellStatsIn : flow
-    connect cellStatsIn -> SafetyManager.cellStatsIn : flow
-    connect packVoltageIn -> StateEstimator.voltageIn : flow
-    connect packVoltageIn -> SafetyManager.voltageIn : flow
-    connect packCurrentIn -> StateEstimator.currentIn : flow
-    connect packCurrentIn -> LimitsCalculator.currentIn : flow
-    connect packCurrentIn -> SafetyManager.currentIn : flow
-    connect isolationIn -> SafetyManager.isolationIn : flow
-    connect coolantTempIn -> ThermalController.coolantTempIn : flow
-    connect coolantFlowIn -> ThermalController.coolantFlowIn : flow
+    // Sensor data distribution (input delegations: parent required → child required)
+    connect cellDataIn -> StateEstimator.cellDataIn : delegation
+    connect cellDataIn -> BalancingController.cellDataIn : delegation
+    connect cellDataIn -> SafetyManager.cellDataIn : delegation
+    connect cellStatsIn -> StateEstimator.cellStatsIn : delegation
+    connect cellStatsIn -> LimitsCalculator.cellStatsIn : delegation
+    connect cellStatsIn -> BalancingController.cellStatsIn : delegation
+    connect cellStatsIn -> ThermalController.cellStatsIn : delegation
+    connect cellStatsIn -> ChargingController.cellStatsIn : delegation
+    connect cellStatsIn -> SafetyManager.cellStatsIn : delegation
+    connect packVoltageIn -> StateEstimator.voltageIn : delegation
+    connect packVoltageIn -> SafetyManager.voltageIn : delegation
+    connect packCurrentIn -> StateEstimator.currentIn : delegation
+    connect packCurrentIn -> LimitsCalculator.currentIn : delegation
+    connect packCurrentIn -> SafetyManager.currentIn : delegation
+    connect isolationIn -> SafetyManager.isolationIn : delegation
+    connect coolantTempIn -> ThermalController.coolantTempIn : delegation
+    connect coolantFlowIn -> ThermalController.coolantFlowIn : delegation
     connect chargeRequestIn -> ChargingController.chargeRequestIn : delegation
 
     // Internal processing flows
@@ -886,6 +1062,7 @@ logical "BMS Architecture" {
     connect ThermalController.thermalCmdOut -> thermalCmdOut : delegation
     connect ChargingController.chargeLimitsOut -> chargeLimitsOut : delegation
     connect SafetyManager.faultOut -> DiagnosticsController.faultIn : flow
+    connect SafetyManager.faultOut -> faultAlertOut : delegation
     connect DiagnosticsController.logOut -> faultLogOut : delegation
     connect DiagnosticsController.diagPort -> diagPort : delegation
   }
@@ -948,6 +1125,85 @@ logical "BMS Architecture" {
   }
 
   // =========================================================================
+  // Power State Manager
+  // =========================================================================
+
+  component PowerStateManager: module {
+    port faultIn: flow required
+    port selfTestIn: flow required
+    port wakeupIn: flow required
+    port stateOut: flow provided
+    port contactorCtrl: flow provided
+    integrity: "ASIL_C"
+  }
+
+  // =========================================================================
+  // Insulation Monitor Subsystem (dedicated IMD)
+  // =========================================================================
+
+  component InsulationMonitorSubsystem: subsystem {
+    port rawIsolation: flow required
+    port isolationOut: flow provided
+    integrity: "ASIL_C"
+
+    component IsolationSensor: block {
+      port rawIn: flow required
+      port measuredOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    component IsolationEvaluator: block {
+      port measuredIn: flow required
+      port statusOut: flow provided
+    }
+
+    connect rawIsolation -> IsolationSensor.rawIn : delegation
+    connect IsolationSensor.measuredOut -> IsolationEvaluator.measuredIn : flow
+    connect IsolationEvaluator.statusOut -> isolationOut : delegation
+  }
+
+  // =========================================================================
+  // Data Logger Module
+  // =========================================================================
+
+  component DataLoggerModule: module {
+    port cellDataIn: flow required
+    port faultIn: flow required
+
+    component FlashController: block {
+      port dataIn: flow required
+      port writeCmd: flow provided
+    }
+
+    component EventBuffer: block {
+      port eventIn: flow required
+      port bufferedOut: flow provided
+    }
+
+    connect faultIn -> EventBuffer.eventIn : delegation
+    connect EventBuffer.bufferedOut -> FlashController.dataIn : flow
+  }
+
+  // =========================================================================
+  // Wakeup Controller
+  // =========================================================================
+
+  component WakeupController: module {
+    port wakeupIn: flow required
+    port powerOut: flow provided
+  }
+
+  // =========================================================================
+  // Self-Test Module
+  // =========================================================================
+
+  component SelfTestModule: module {
+    port testIn: flow required
+    port testOut: flow provided
+    integrity: "ASIL_B"
+  }
+
+  // =========================================================================
   // Top-level connections
   // =========================================================================
 
@@ -961,6 +1217,16 @@ logical "BMS Architecture" {
   connect BMSController.thermalCmdOut -> ThermalSubsystem.thermalCmd
   connect BMSController.vcuReportOut -> CommunicationSubsystem.vcuData
   connect BMSController.chargeLimitsOut -> CommunicationSubsystem.chargerData
+
+  // New connections for added components
+  connect BMSController.faultAlertOut -> PowerStateManager.faultIn
+  connect SelfTestModule.testOut -> PowerStateManager.selfTestIn
+  connect WakeupController.powerOut -> PowerStateManager.wakeupIn
+  connect PowerStateManager.contactorCtrl -> ContactorSubsystem.contactorCmd
+  connect PowerStateManager.stateOut -> CommunicationSubsystem.vcuData
+  connect InsulationMonitorSubsystem.isolationOut -> BMSController.isolationIn
+  connect CellMonitoringSubsystem.cellData -> DataLoggerModule.cellDataIn
+  connect BMSController.faultAlertOut -> DataLoggerModule.faultIn
 
   // Interfaces
   interface ICellMonitoring {
@@ -1157,6 +1423,22 @@ physical "BMS Hardware" {
   link CoolantPWM: point_to_point {
     BMSMasterECU.pwm1 <-> CoolantPump.pwmIn
     BMSMasterECU.pwm2 <-> CoolantValve.pwmIn
+  }
+
+  // =========================================================================
+  // Non-volatile storage
+  // =========================================================================
+
+  node FlashMemoryIC: memory {
+    port spi: electrical inout [protocol: "SPI"]
+    resources {
+      storage: "16MB NOR Flash"
+    }
+  }
+
+  link FlashSPI: bus {
+    BMSMasterECU.eth0 <-> FlashMemoryIC.spi
+    [bandwidth: "40Mbit/s", protocol: "SPI"]
   }
 }
 
@@ -1562,6 +1844,18 @@ allocations {
 
   ManageDiagnostics -> BMSController.DiagnosticsController [type: full]
 
+  // --- New function allocations ---
+
+  ManagePowerState -> PowerStateManager [type: full]
+  MonitorInsulation -> InsulationMonitorSubsystem [type: full]
+  MonitorInsulation.MeasureIsolationResistance -> InsulationMonitorSubsystem.IsolationSensor [type: full]
+  MonitorInsulation.EvaluateIsolationStatus -> InsulationMonitorSubsystem.IsolationEvaluator [type: full]
+  LogData -> DataLoggerModule [type: full]
+  LogData.RecordCellHistory -> DataLoggerModule.FlashController [type: full]
+  LogData.StoreEventLog -> DataLoggerModule.EventBuffer [type: full]
+  CoordinateWakeup -> WakeupController [type: full]
+  PerformSelfTest -> SelfTestModule [type: full]
+
   // --- Act functions -> Actuator subsystems ---
 
   DriveContactors -> ContactorSubsystem [type: full]
@@ -1642,6 +1936,19 @@ realizations {
   // --- Communication -> Master ECU ---
 
   CommunicationSubsystem -> BMSMasterECU [type: software]
+
+  // --- New component realizations ---
+
+  PowerStateManager -> BMSMasterECU [type: software]
+  InsulationMonitorSubsystem -> IsolationMonitorIC [type: hardware]
+  InsulationMonitorSubsystem -> BMSMasterECU [type: software]
+  InsulationMonitorSubsystem.IsolationSensor -> IsolationMonitorIC [type: hardware]
+  InsulationMonitorSubsystem.IsolationEvaluator -> BMSMasterECU [type: software]
+  DataLoggerModule -> BMSMasterECU [type: software]
+  DataLoggerModule.FlashController -> FlashMemoryIC [type: hardware]
+  DataLoggerModule.EventBuffer -> BMSMasterECU [type: software]
+  WakeupController -> BMSMasterECU [type: software]
+  SelfTestModule -> BMSMasterECU [type: software]
 }
 
 // -----------------------------------------------------------------------------
@@ -1675,6 +1982,16 @@ trace {
   BMS-061 satisfiedBy SuperviseSafety.DecideContactor
   BMS-070 satisfiedBy ReportToVCU
   BMS-071 satisfiedBy ManageDiagnostics
+  BMS-080 satisfiedBy ManagePowerState
+  BMS-081 satisfiedBy ManagePowerState.CoordinateShutdown
+  BMS-090 satisfiedBy MonitorInsulation
+  BMS-090 satisfiedBy MonitorInsulation.MeasureIsolationResistance
+  BMS-100 satisfiedBy LogData
+  BMS-100 satisfiedBy LogData.RecordCellHistory
+  BMS-100 satisfiedBy LogData.StoreEventLog
+  BMS-110 satisfiedBy PerformSelfTest
+  BMS-110 satisfiedBy PerformSelfTest.TestSensorChain
+  BMS-110 satisfiedBy PerformSelfTest.TestActuatorChain
 
   // =========================================================================
   // Requirements -> Logical
@@ -1691,6 +2008,10 @@ trace {
   BMS-040 satisfiedBy BMSController.BalancingController
   BMS-050 satisfiedBy BMSController.ChargingController
   BMS-061 satisfiedBy ContactorSubsystem
+  BMS-080 satisfiedBy PowerStateManager
+  BMS-090 satisfiedBy InsulationMonitorSubsystem
+  BMS-100 satisfiedBy DataLoggerModule
+  BMS-110 satisfiedBy SelfTestModule
 
   // =========================================================================
   // Requirements -> Software
@@ -1760,7 +2081,8 @@ trace {
 // Views — Filtered diagram perspectives
 // =============================================================================
 
-// Safety-critical chain: sensors → supervision → contactors (ASIL C/D)
+// --- Functional Layer Views ---
+
 view "Safety Chain" {
   type: custom
   layer: functional
@@ -1768,7 +2090,6 @@ view "Safety Chain" {
   ports: connected
 }
 
-// Thermal management context: ControlThermal + direct neighbors
 view "Thermal Management" {
   type: context
   layer: functional
@@ -1778,7 +2099,6 @@ view "Thermal Management" {
   ports: connected
 }
 
-// State estimation chain: measurement → estimation → limit computation
 view "SOC/SOH Estimation" {
   type: custom
   layer: functional
@@ -1786,7 +2106,6 @@ view "SOC/SOH Estimation" {
   ports: connected
 }
 
-// Charging control context: ControlCharging + all suppliers and consumers
 view "Charging Control" {
   type: context
   layer: functional
@@ -1796,40 +2115,101 @@ view "Charging Control" {
   ports: connected
 }
 
-// Logical views — filter the logical diagram
-
-// Safety-critical path: sensors → controller → contactors
-view "Safety Path" {
+view "Sense-Act Overview" {
   type: custom
-  layer: logical
-  include: [PackMeasurementSubsystem, CellMonitoringSubsystem, BMSController, ContactorSubsystem]
+  layer: functional
+  include: [AcquireCellData, MeasurePackElectrical, MeasureCoolant, MonitorInsulation, DriveContactors, DriveBalancing, DriveCoolant, ReportToVCU]
   ports: connected
 }
 
-// Thermal management context
-view "Thermal Context" {
+view "System Management" {
+  type: custom
+  layer: functional
+  include: [ManagePowerState, CoordinateWakeup, PerformSelfTest, ManageDiagnostics, LogData]
+  ports: connected
+}
+
+// --- Logical Layer Views ---
+
+view "Safety Critical Components" {
+  type: custom
+  layer: logical
+  include: [BMSController, PackMeasurementSubsystem, ContactorSubsystem, PowerStateManager]
+  ports: connected
+}
+
+view "BMSController Context" {
   type: context
   layer: logical
-  focus: ThermalSubsystem
+  focus: BMSController
   depth: 1
   direction: both
   ports: connected
 }
 
-// Physical views — filter the physical diagram
+view "Sensing Subsystems" {
+  type: custom
+  layer: logical
+  include: [CellMonitoringSubsystem, PackMeasurementSubsystem, InsulationMonitorSubsystem]
+  ports: connected
+}
 
-// isoSPI sensor network: CMICs → Master ECU
-view "Cell Sensor Network" {
+// --- Physical Layer Views ---
+
+view "isoSPI Network" {
   type: custom
   layer: physical
   include: [BMSMasterECU, CMIC_Chain1, CMIC_Chain2, CMIC_Chain3]
 }
 
-// Master ECU + all connected nodes
 view "Master ECU Context" {
   type: context
   layer: physical
   focus: BMSMasterECU
   depth: 1
   direction: both
+}
+
+view "HV Power Path" {
+  type: custom
+  layer: physical
+  include: [HVVoltageSensor, HVCurrentSensor, MainContactorPos, MainContactorNeg, PrechargeRelay]
+}
+
+// --- Chain Views ---
+
+view "Overvoltage Protection Chain" {
+  type: chain
+  start: BMS-020
+  direction: forward
+}
+
+view "Thermal Chain" {
+  type: chain
+  start: BMS-030
+  direction: forward
+}
+
+view "Master ECU Traceability" {
+  type: chain
+  start: BMSMasterECU
+  direction: backward
+}
+
+view "Cell Monitoring Chain" {
+  type: chain
+  start: BMS-001
+  direction: forward
+}
+
+view "SOC Estimation Chain" {
+  type: chain
+  start: BMS-010
+  direction: forward
+}
+
+view "Charging Chain" {
+  type: chain
+  start: BMS-050
+  direction: forward
 }
