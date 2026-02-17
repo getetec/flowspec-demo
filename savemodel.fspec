@@ -1,0 +1,465 @@
+// ═══════════════════════════════════════════════════════════════
+// Vehicle Control System — FlowSpec RFLP Demo
+// ═══════════════════════════════════════════════════════════════
+// Cruise control with safety monitoring, thermal protection,
+// brake override, and driver status display.
+
+project "Vehicle Control System" {
+  version: "1.0"
+  domain: "automotive"
+}
+
+// ─── Schema ──────────────────────────────────────────────────
+
+schema {
+  // Physical measurements
+  type Speed: physical float64 [unit: "km/h", range: 0..300]
+  type Temperature: physical float64 [unit: "°C", range: -40..150]
+  type BrakeForce: physical float64 [unit: "N", range: 0..30000]
+  type TargetSpeed: physical float64 [unit: "km/h", range: 0..250]
+
+  // Control values
+  type Percentage: float64 [range: 0..100]
+
+  // Electrical measurements
+  type BatteryVoltage: physical float64 [unit: "V", range: 0..500]
+  type BatterySOC: float64 [unit: "%", range: 0..100]
+
+  // Status types
+  type SystemStatus: enum { ok, warning, overtemp, emergency }
+  type DriveMode: enum { off, eco, normal, sport }
+}
+
+// ─── Requirements ────────────────────────────────────────────
+
+requirements "System Requirements" {
+  spec-type: system_spec
+
+  req SYS-001 "Cruise Control" {
+    type: functional
+    priority: must
+    statement: "The system shall maintain vehicle speed within 2 km/h of the target."
+  }
+
+  req SYS-002 "Brake Override" {
+    type: functional
+    priority: must
+    integrity: "ASIL-D"
+    statement: "Brake input shall immediately cut throttle and apply full braking force."
+  }
+
+  req SYS-003 "Thermal Protection" {
+    type: functional
+    priority: must
+    integrity: "ASIL-B"
+    statement: "The system shall reduce power when temperature exceeds 120 °C."
+  }
+
+  req SYS-004 "Status Display" {
+    type: functional
+    priority: should
+    statement: "The system shall display current operating status to the driver."
+  }
+
+  req SYS-005 "Drive Mode Selection" {
+    type: functional
+    priority: should
+    statement: "The driver shall select a drive mode that adjusts throttle response."
+  }
+
+  req SYS-006 "Battery Monitoring" {
+    type: functional
+    priority: must
+    statement: "The system shall monitor battery voltage and temperature to estimate SOC."
+  }
+
+  req SYS-007 "Energy Recovery" {
+    type: functional
+    priority: should
+    statement: "The system shall recover kinetic energy during braking (recuperation)."
+  }
+
+  req SYS-008 "Telemetry Logging" {
+    type: non_functional
+    priority: should
+    statement: "The system shall log operational status and drive mode for diagnostics."
+  }
+}
+
+// ─── Functional Architecture ─────────────────────────────────
+
+functional "Vehicle Control" {
+
+  // === Sense ===
+
+  function ReadSensors: source {
+    port speedCtrl: out Speed
+    port speedMon: out Speed
+    port tempOut: out Temperature
+    port voltageOut: out BatteryVoltage
+  }
+
+  function ReadDriver: source {
+    port targetOut: out TargetSpeed
+    port brakeOut: out BrakeForce
+    port modeOut: out DriveMode
+  }
+
+  // === Think ===
+
+  function ComputeControl: transform {
+    port speedIn: in Speed
+    port targetIn: in TargetSpeed
+    port modeIn: in DriveMode
+    port throttleOut: out Percentage
+
+    function CalcSpeedError: transform {
+      port speedRef: in Speed
+      port targetRef: in TargetSpeed
+      port errorOut: out Percentage
+    }
+
+    function ComputeThrottle: transform {
+      port errorIn: in Percentage
+      port modeRef: in DriveMode
+      port throttleCalc: out Percentage
+    }
+
+    flow CalcSpeedError.errorOut -> ComputeThrottle.errorIn
+
+    // Delegation
+    flow speedIn -> CalcSpeedError.speedRef : delegation
+    flow targetIn -> CalcSpeedError.targetRef : delegation
+    flow modeIn -> ComputeThrottle.modeRef : delegation
+    flow ComputeThrottle.throttleCalc -> throttleOut : delegation
+  }
+
+  function MonitorSafety: transform {
+    port speedIn: in Speed
+    port tempIn: in Temperature
+    port brakeIn: in BrakeForce
+    port statusOut: out SystemStatus
+    port emergencyOut: out Percentage
+    port brakeForceOut: out BrakeForce
+    integrity: "ASIL-D"
+  }
+
+  // === Act ===
+
+  function ApplyThrottle: sink {
+    port throttleIn: in Percentage
+    port emergencyIn: in Percentage
+  }
+
+  function ApplyBrake: sink {
+    port forceIn: in BrakeForce
+  }
+
+  function DisplayStatus: sink {
+    port statusIn: in SystemStatus
+  }
+
+  function MonitorBattery: transform {
+    port voltageIn: in BatteryVoltage
+    port tempIn: in Temperature
+    port socOut: out BatterySOC
+    port batteryStatusOut: out SystemStatus
+
+    function EstimateCharge: transform {
+      port voltageIn: in BatteryVoltage
+      port socOut: out BatterySOC
+    }
+
+    function CheckHealth: transform {
+      port tempIn: in Temperature
+      port socIn: in BatterySOC
+      port statusOut: out SystemStatus
+    }
+
+    flow EstimateCharge.socOut -> CheckHealth.socIn
+
+    // Delegation
+    flow voltageIn -> EstimateCharge.voltageIn : delegation
+    flow tempIn -> CheckHealth.tempIn : delegation
+    flow EstimateCharge.socOut -> socOut : delegation
+    flow CheckHealth.statusOut -> batteryStatusOut : delegation
+  }
+
+  function ManageEnergy: transform {
+    port brakeIn: in BrakeForce
+    port speedIn: in Speed
+    port recuperationOut: out Percentage
+  }
+
+  function LogTelemetry: sink {
+    port statusIn: in SystemStatus
+    port modeIn: in DriveMode
+  }
+
+  // --- Control chain ---
+  flow ReadSensors.speedCtrl -> ComputeControl.speedIn
+  flow ReadDriver.targetOut -> ComputeControl.targetIn
+  flow ReadDriver.modeOut -> ComputeControl.modeIn
+  flow ComputeControl.throttleOut -> ApplyThrottle.throttleIn
+
+  // --- Safety chain ---
+  flow ReadSensors.speedMon -> MonitorSafety.speedIn
+  flow ReadSensors.tempOut -> MonitorSafety.tempIn
+  flow ReadDriver.brakeOut -> MonitorSafety.brakeIn
+  flow MonitorSafety.emergencyOut -> ApplyThrottle.emergencyIn
+  flow MonitorSafety.brakeForceOut -> ApplyBrake.forceIn
+  flow MonitorSafety.statusOut -> DisplayStatus.statusIn
+
+  // --- Battery monitoring ---
+  flow ReadSensors.voltageOut -> MonitorBattery.voltageIn
+  flow ReadSensors.tempOut -> MonitorBattery.tempIn
+
+  // --- Energy recovery ---
+  flow ReadDriver.brakeOut -> ManageEnergy.brakeIn
+  flow ReadSensors.speedCtrl -> ManageEnergy.speedIn
+
+  // --- Telemetry ---
+  flow MonitorBattery.batteryStatusOut -> LogTelemetry.statusIn
+  flow ReadDriver.modeOut -> LogTelemetry.modeIn
+}
+
+// ─── Logical Architecture ────────────────────────────────────
+
+logical "Control Architecture" {
+  component SensorUnit: subsystem {
+    port sensorData: flow provided
+    port sensorMon: flow provided
+  }
+
+  component DriverInterface: subsystem {
+    port driverInput: flow provided
+    port displayIn: flow required
+  }
+
+  component ControlUnit: subsystem {
+    port sensorIn: flow required
+    port driverIn: flow required
+    port actuatorOut: flow provided
+  }
+
+  component SafetyUnit: subsystem {
+    port monitorIn: flow required
+    port emergencyOut: flow provided
+    port statusOut: flow provided
+    integrity: "ASIL-D"
+  }
+
+  component ActuatorUnit: subsystem {
+    port throttleIn: flow required
+    port brakeIn: flow required
+  }
+
+  component BatteryMonitor: subsystem {
+    port batteryIn: flow required
+    port statusOut: flow provided
+  }
+
+  component EnergyController: subsystem {
+    port brakeIn: flow required
+    port speedIn: flow required
+    port recuperationOut: flow provided
+  }
+
+  component TelemetryUnit: module {
+    port dataIn: flow required
+  }
+
+  // Existing connections
+  connect SensorUnit.sensorData -> ControlUnit.sensorIn : flow
+  connect SensorUnit.sensorMon -> SafetyUnit.monitorIn : flow
+  connect DriverInterface.driverInput -> ControlUnit.driverIn : flow
+  connect ControlUnit.actuatorOut -> ActuatorUnit.throttleIn : flow
+  connect SafetyUnit.emergencyOut -> ActuatorUnit.brakeIn : flow
+  connect SafetyUnit.statusOut -> DriverInterface.displayIn : flow
+
+  // New connections
+  connect SensorUnit.sensorData -> BatteryMonitor.batteryIn : flow
+  connect SensorUnit.sensorData -> EnergyController.speedIn : flow
+  connect DriverInterface.driverInput -> EnergyController.brakeIn : flow
+  connect BatteryMonitor.statusOut -> TelemetryUnit.dataIn : flow
+}
+
+// ─── Physical Architecture ───────────────────────────────────
+
+physical "Hardware Topology" {
+  node SensorECU: processing_unit {
+    port canOut: electrical out [protocol: "CAN-FD"]
+    resources {
+      cpu: "Renesas RH850 @80MHz"
+      memory: "512KB SRAM"
+    }
+  }
+
+  node MainECU: processing_unit {
+    port canIn: electrical in [protocol: "CAN-FD"]
+    port canOut: electrical out [protocol: "CAN-FD"]
+    port canOut2: electrical out [protocol: "CAN-FD"]
+    resources {
+      cpu: "Infineon AURIX TC387 @300MHz"
+      memory: "4MB SRAM"
+    }
+    integrity: "ASIL-D"
+  }
+
+  node ActuatorECU: processing_unit {
+    port canIn: electrical in [protocol: "CAN-FD"]
+    resources {
+      cpu: "NXP S32K344 @160MHz"
+      memory: "1MB SRAM"
+    }
+  }
+
+  node TelemetryECU: processing_unit {
+    port canIn: electrical in [protocol: "CAN-FD"]
+    resources {
+      cpu: "NXP S32K312 @120MHz"
+      memory: "256KB SRAM"
+      storage: "4MB Flash"
+    }
+  }
+
+  link SensorBus: bus {
+    SensorECU.canOut <-> MainECU.canIn
+    [bandwidth: "2 Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link ActuatorBus: bus {
+    MainECU.canOut <-> ActuatorECU.canIn
+    [bandwidth: "2 Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link TelemetryBus: bus {
+    MainECU.canOut2 <-> TelemetryECU.canIn
+    [bandwidth: "2 Mbit/s", protocol: "CAN-FD"]
+  }
+}
+
+// ─── Allocations (F → L) ────────────────────────────────────
+
+allocations {
+  ReadSensors -> SensorUnit [type: full]
+  ReadDriver -> DriverInterface [type: full]
+  ComputeControl -> ControlUnit [type: full]
+  MonitorSafety -> SafetyUnit [type: full]
+  ApplyThrottle -> ActuatorUnit [type: full]
+  ApplyBrake -> ActuatorUnit [type: full]
+  DisplayStatus -> DriverInterface [type: full]
+  MonitorBattery -> BatteryMonitor [type: full]
+  ManageEnergy -> EnergyController [type: full]
+  LogTelemetry -> TelemetryUnit [type: full]
+}
+
+// ─── Realizations (L → P) ───────────────────────────────────
+
+realizations {
+  SensorUnit -> SensorECU
+  DriverInterface -> MainECU
+  ControlUnit -> MainECU
+  SafetyUnit -> MainECU
+  ActuatorUnit -> ActuatorECU
+  BatteryMonitor -> MainECU
+  EnergyController -> MainECU
+  TelemetryUnit -> TelemetryECU
+}
+
+// ─── Trace (R → F) ──────────────────────────────────────────
+
+trace {
+  SYS-001 satisfiedBy ComputeControl
+  SYS-002 satisfiedBy MonitorSafety
+  SYS-003 satisfiedBy MonitorSafety
+  SYS-004 satisfiedBy DisplayStatus
+  SYS-005 satisfiedBy ComputeControl
+  SYS-006 satisfiedBy MonitorBattery
+  SYS-007 satisfiedBy ManageEnergy
+  SYS-008 satisfiedBy LogTelemetry
+}
+
+// ─── Views ───────────────────────────────────────────────────
+
+// --- Functional views ---
+view "Control Loop" {
+  type: custom
+  layer: functional
+  include: [ReadSensors, ReadDriver, ComputeControl, ApplyThrottle]
+  ports: connected
+}
+
+view "Safety Overview" {
+  type: context
+  layer: functional
+  focus: MonitorSafety
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+view "Energy & Battery" {
+  type: custom
+  layer: functional
+  include: [ReadSensors, ReadDriver, MonitorBattery, ManageEnergy, LogTelemetry]
+  ports: connected
+}
+
+// --- Logical views ---
+view "Control Path" {
+  type: custom
+  layer: logical
+  include: [SensorUnit, ControlUnit, ActuatorUnit]
+  ports: connected
+}
+
+view "Safety Context" {
+  type: context
+  layer: logical
+  focus: SafetyUnit
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+view "Energy Management" {
+  type: custom
+  layer: logical
+  include: [BatteryMonitor, EnergyController, ControlUnit]
+  ports: connected
+}
+
+// --- Physical views ---
+view "MainECU Context" {
+  type: context
+  layer: physical
+  focus: MainECU
+  depth: 1
+  direction: both
+}
+
+view "Communication Network" {
+  type: custom
+  layer: physical
+  include: [SensorECU, MainECU, ActuatorECU, TelemetryECU]
+}
+
+// --- Chain views ---
+view "Cruise Control Chain" {
+  type: chain
+  start: SYS-001
+  direction: forward
+}
+
+view "Safety Chain" {
+  type: chain
+  start: SYS-002
+  direction: both
+}
+
+view "Battery Monitoring Chain" {
+  type: chain
+  start: SYS-006
+  direction: forward
+}
