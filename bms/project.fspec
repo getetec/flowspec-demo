@@ -1,0 +1,23 @@
+// =============================================================================
+// Battery Management System (BMS) — Multi-File FlowSpec RFLP Example
+// =============================================================================
+// Models a lithium-ion battery management system for an electric vehicle.
+// Covers cell monitoring, state estimation (SOC/SOH), thermal management,
+// cell balancing, charging control, and fault isolation across all RFLP layers.
+//
+// Pack topology: 108s4p (108 cells in series, 4 in parallel = 27 modules × 4s4p)
+// Nominal voltage: 400V | Capacity: ~80 kWh
+
+project "Battery Management System" {
+  version: "2.0"
+}
+
+import "./schema.fspec"
+import "./requirements.fspec"
+import "./functional.fspec"
+import "./logical.fspec"
+import "./physical.fspec"
+import "./software.fspec"
+import "./mappings-trace.fspec"
+import "./views.fspec"
+import "./testing.fspec"
