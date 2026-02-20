@@ -1,0 +1,145 @@
+// -----------------------------------------------------------------------------
+// Schema — Data Type Definitions
+// -----------------------------------------------------------------------------
+
+schema {
+
+  // --- Electrical primitives ---
+
+  type CellVoltage: physical float64 [unit: "V", range: 2.5..4.2]
+  type PackVoltage: physical float64 [unit: "V", range: 270..420]
+  type PackCurrent: physical float64 [unit: "A", range: -350..350]
+  type Resistance: physical float64 [unit: "mΩ", range: 0..500]
+  type Energy: physical float64 [unit: "kWh", range: 0..100]
+  type Power: physical float64 [unit: "kW", range: -150..250]
+
+  // --- Thermal primitives ---
+
+  type Temperature: physical float64 [unit: "°C", range: -40..80]
+  type CoolantFlow: physical float64 [unit: "L/min", range: 0..20]
+  type CoolantTemp: physical float64 [unit: "°C", range: -10..60]
+
+  // --- State/percentage types ---
+
+  type Percentage: float64 [range: 0..100]
+  type SOC: float64 [unit: "%", range: 0..100]
+  type SOH: float64 [unit: "%", range: 0..100]
+  type Timestamp: uint64 [unit: "ms"]
+
+  // --- Indices and identifiers ---
+
+  type CellIndex: uint16 [range: 0..431]
+  type ModuleIndex: uint8 [range: 0..26]
+
+  // --- Enumerations ---
+
+  type BMSState: enum {
+    off, standby, driving, charging,
+    precharging, error, emergency_shutdown
+  }
+
+  type ChargeMode: enum { off, ac_slow, ac_fast, dc_fast, dc_ultra }
+
+  type BalancingMode: enum { off, passive, active }
+
+  type ContactorState: enum { open, closing, closed, welded, error }
+
+  type FaultSeverity: enum { info, warning, critical, fatal }
+
+  type ThermalAction: enum { idle, heating, cooling_low, cooling_high, emergency_cool }
+
+  type CellChemistry: enum { NMC811, NMC622, LFP, NCA }
+
+  type IsolationStatus: enum { ok, degraded, fault }
+
+  // --- Structures ---
+
+  type CellData: struct {
+    voltage: CellVoltage
+    temperature: Temperature
+    balancing: boolean
+  }
+
+  type CellArray: array<CellData> [size: 4]
+
+  type ModuleData: struct {
+    moduleId: ModuleIndex
+    cells: CellArray
+    moduleTemp: Temperature
+    moduleVoltage: PackVoltage
+  }
+
+  type PackState: struct {
+    voltage: PackVoltage
+    current: PackCurrent
+    soc: SOC
+    soh: SOH
+    power: Power
+    energy: Energy
+    bmsState: BMSState
+    timestamp: Timestamp
+  }
+
+  type CellStatistics: struct {
+    minVoltage: CellVoltage
+    maxVoltage: CellVoltage
+    avgVoltage: CellVoltage
+    deltaVoltage: CellVoltage
+    minTemp: Temperature
+    maxTemp: Temperature
+    avgTemp: Temperature
+    deltaTemp: Temperature
+  }
+
+  type ThermalStatus: struct {
+    coolantInletTemp: CoolantTemp
+    coolantOutletTemp: CoolantTemp
+    coolantFlow: CoolantFlow
+    action: ThermalAction
+    pumpDuty: Percentage
+    valvePosition: Percentage
+  }
+
+  type ChargeRequest: struct {
+    mode: ChargeMode
+    targetSOC: SOC
+    maxCurrent: PackCurrent
+    maxVoltage: PackVoltage
+  }
+
+  type ChargeLimits: struct {
+    maxChargeCurrent: PackCurrent
+    maxDischargeCurrent: PackCurrent
+    maxChargeVoltage: PackVoltage
+    minDischargeVoltage: PackVoltage
+    maxChargePower: Power
+    maxDischargePower: Power
+  }
+
+  type ContactorCommand: struct {
+    mainPositive: ContactorState
+    mainNegative: ContactorState
+    precharge: ContactorState
+  }
+
+  type FaultEntry: struct {
+    code: uint16
+    severity: FaultSeverity
+    moduleId: ModuleIndex
+    cellId: CellIndex
+    value: float64
+    timestamp: Timestamp
+  }
+
+  type IsolationMeasurement: struct {
+    resistancePositive: Resistance
+    resistanceNegative: Resistance
+    status: IsolationStatus
+  }
+
+  // --- Array types ---
+
+  type ModuleArray: array<ModuleData> [size: 27]
+  type FaultLog: array<FaultEntry> [size: 64]
+  type SOCHistory: array<SOC> [size: 1000]
+}
