@@ -1,0 +1,354 @@
+// -----------------------------------------------------------------------------
+// Software Architecture (SW Layer)
+// -----------------------------------------------------------------------------
+
+software "BMS Software" {
+
+  // =========================================================================
+  // Service Interfaces
+  // =========================================================================
+
+  service ICellAcquisition {
+    operation getCellData(): ModuleArray
+    operation getCellStatistics(): CellStatistics
+    event cellDataUpdated: ModuleArray
+    error CMICCommunicationLost [code: 0x0100]
+    error CellSensorFault [code: 0x0101]
+  }
+
+  service IStateEstimation {
+    operation getSOC(): SOC
+    operation getSOH(): SOH
+    operation getPackState(): PackState
+    operation resetSOC(newSOC: in SOC): boolean
+    event socUpdated: SOC
+    error EstimationDiverged [code: 0x0200]
+  }
+
+  service IContactorControl {
+    operation closeContactors(): boolean
+    operation openContactors(): boolean
+    operation getContactorState(): ContactorCommand
+    event contactorStateChanged: ContactorCommand
+    error ContactorWelded [code: 0x0300]
+    error ContactorOpenFailed [code: 0x0301]
+  }
+
+  service ISafetySupervision {
+    operation getFaults(): FaultLog
+    operation clearFaults(): boolean
+    operation getIsolation(): IsolationMeasurement
+    event faultRaised: FaultEntry
+    event emergencyShutdown: boolean
+    error SafetyViolation [code: 0x0400]
+  }
+
+  service ICharging {
+    operation getChargeLimits(): ChargeLimits
+    operation setChargeRequest(req: in ChargeRequest): boolean
+    operation abortCharging(): boolean
+    event chargeLimitsUpdated: ChargeLimits
+    error ChargerCommunicationLost [code: 0x0500]
+  }
+
+  service IDiagnostic {
+    operation readDTC(): FaultLog
+    operation clearDTC(): boolean
+    operation readCellData(moduleId: in ModuleIndex): ModuleData
+    operation readPackState(): PackState
+    operation writeCalibration(key: in string, value: in float64): boolean
+  }
+
+  // =========================================================================
+  // SW Components — Drivers (BSW)
+  // =========================================================================
+
+  swcomponent CMICDriver: adapter {
+    port isoSPIRaw: flow required byte
+    port cellDataOut: flow provided ModuleArray
+    port cellStatsOut: flow provided CellStatistics
+    port balancingCmdIn: flow required ModuleArray
+    port cellService: service provided ICellAcquisition
+
+    behavior AcquireCells {
+      trigger: periodic "10ms"
+      budget: "4ms"
+      access: [isoSPIRaw: read, cellDataOut: write, cellStatsOut: write]
+    }
+
+    behavior ProcessBalancing {
+      trigger: periodic "100ms"
+      budget: "2ms"
+      access: [balancingCmdIn: read, isoSPIRaw: write]
+    }
+  }
+
+  swcomponent PackSensorDriver: adapter {
+    port adcRaw: flow required byte
+    port voltageOut: flow provided PackVoltage
+    port currentOut: flow provided PackCurrent
+    port isolationOut: flow provided IsolationMeasurement
+
+    behavior ReadPackSensors {
+      trigger: periodic "1ms"
+      budget: "0.3ms"
+      access: [adcRaw: read, voltageOut: write, currentOut: write]
+    }
+
+    behavior ReadIsolation {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [adcRaw: read, isolationOut: write]
+    }
+  }
+
+  swcomponent CoolantSensorDriver: adapter {
+    port adcRaw: flow required byte
+    port pulseRaw: flow required byte
+    port coolantTempOut: flow provided CoolantTemp
+    port coolantFlowOut: flow provided CoolantFlow
+
+    behavior ReadCoolant {
+      trigger: periodic "50ms"
+      budget: "2ms"
+      access: [adcRaw: read, pulseRaw: read, coolantTempOut: write, coolantFlowOut: write]
+    }
+  }
+
+  swcomponent ContactorDriver: adapter {
+    port gpioOut: flow provided byte
+    port contactorCmdIn: flow required ContactorCommand
+    port contactorService: service provided IContactorControl
+
+    behavior DriveContactors {
+      trigger: periodic "5ms"
+      budget: "0.5ms"
+      access: [contactorCmdIn: read, gpioOut: write]
+    }
+  }
+
+  swcomponent CoolantActuatorDriver: adapter {
+    port pwmOut: flow provided byte
+    port thermalCmdIn: flow required ThermalStatus
+
+    behavior DrivePWM {
+      trigger: periodic "20ms"
+      budget: "1ms"
+      access: [thermalCmdIn: read, pwmOut: write]
+    }
+  }
+
+  // =========================================================================
+  // SW Components — Application Layer
+  // =========================================================================
+
+  swcomponent StateEstimationApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port voltageIn: flow required PackVoltage [queued: true, queueLength: 20]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 20]
+    port socOut: flow provided SOC
+    port sohOut: flow provided SOH
+    port energyOut: flow provided Energy
+    port packStateOut: flow provided PackState
+    port stateService: service provided IStateEstimation
+
+    behavior CyclicSOC {
+      trigger: periodic "10ms"
+      budget: "3ms"
+      access: [voltageIn: read, currentIn: read, cellStatsIn: read, socOut: write]
+    }
+
+    behavior CyclicSOH {
+      trigger: periodic "1000ms"
+      budget: "50ms"
+      access: [cellDataIn: read, currentIn: read, socOut: read, sohOut: write]
+    }
+
+    behavior PublishState {
+      trigger: periodic "10ms"
+      budget: "1ms"
+      access: [socOut: read, sohOut: read, energyOut: write, packStateOut: write]
+    }
+  }
+
+  swcomponent LimitsApp: application {
+    port socIn: flow required SOC [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 5]
+    port limitsOut: flow provided ChargeLimits
+
+    behavior CalcLimits {
+      trigger: periodic "10ms"
+      budget: "2ms"
+      access: [socIn: read, cellStatsIn: read, currentIn: read, limitsOut: write]
+    }
+  }
+
+  swcomponent BalancingApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 2]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port balancingCmdOut: flow provided ModuleArray
+
+    behavior CyclicBalancing {
+      trigger: periodic "1000ms"
+      budget: "10ms"
+      access: [cellDataIn: read, cellStatsIn: read, balancingCmdOut: write]
+    }
+  }
+
+  swcomponent ThermalApp: application {
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port coolantTempIn: flow required CoolantTemp [queued: true, queueLength: 5]
+    port coolantFlowIn: flow required CoolantFlow [queued: true, queueLength: 5]
+    port thermalCmdOut: flow provided ThermalStatus
+
+    behavior CyclicThermal {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [cellStatsIn: read, coolantTempIn: read,
+               coolantFlowIn: read, thermalCmdOut: write]
+    }
+  }
+
+  swcomponent ChargingApp: application {
+    port socIn: flow required SOC [queued: true, queueLength: 5]
+    port limitsIn: flow required ChargeLimits [queued: true, queueLength: 5]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 5]
+    port chargeRequestIn: flow required ChargeRequest [queued: true, queueLength: 2]
+    port chargeLimitsOut: flow provided ChargeLimits
+    port contactorCmdOut: flow provided ContactorCommand
+    port chargingService: service provided ICharging
+
+    behavior CyclicCharging {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [socIn: read, limitsIn: read, cellStatsIn: read,
+               chargeRequestIn: read, chargeLimitsOut: write]
+    }
+
+    behavior OnChargeRequest {
+      trigger: request ICharging.setChargeRequest
+    }
+
+    behavior OnAbortCharging {
+      trigger: request ICharging.abortCharging
+    }
+  }
+
+  swcomponent SafetyApp: application {
+    port cellDataIn: flow required ModuleArray [queued: true, queueLength: 2]
+    port cellStatsIn: flow required CellStatistics [queued: true, queueLength: 2]
+    port voltageIn: flow required PackVoltage [queued: true, queueLength: 10]
+    port currentIn: flow required PackCurrent [queued: true, queueLength: 10]
+    port isolationIn: flow required IsolationMeasurement [queued: true, queueLength: 5]
+    port contactorCmdOut: flow provided ContactorCommand
+    port faultOut: flow provided FaultEntry
+    port safetyService: service provided ISafetySupervision
+    integrity: "ASIL_D"
+
+    behavior CyclicCellCheck {
+      trigger: periodic "5ms"
+      budget: "1ms"
+      access: [cellDataIn: read, cellStatsIn: read, faultOut: write]
+    }
+
+    behavior CyclicPackCheck {
+      trigger: periodic "1ms"
+      budget: "0.2ms"
+      access: [voltageIn: read, currentIn: read, faultOut: write,
+               contactorCmdOut: write]
+    }
+
+    behavior CyclicIsoCheck {
+      trigger: periodic "100ms"
+      budget: "2ms"
+      access: [isolationIn: read, faultOut: write]
+    }
+  }
+
+  swcomponent DiagnosticsApp: service {
+    port faultIn: flow required FaultEntry [queued: true, queueLength: 16]
+    port packStateIn: flow required PackState [queued: true, queueLength: 5]
+    port logOut: flow provided FaultLog
+    port diagService: service provided IDiagnostic
+
+    behavior StoreFaults {
+      trigger: periodic "100ms"
+      budget: "5ms"
+      access: [faultIn: read, logOut: write]
+    }
+
+    behavior OnReadDTC {
+      trigger: request IDiagnostic.readDTC
+    }
+
+    behavior OnClearDTC {
+      trigger: request IDiagnostic.clearDTC
+    }
+
+    behavior OnReadCellData {
+      trigger: request IDiagnostic.readCellData
+    }
+  }
+
+  swcomponent CANCommsApp: application {
+    port packStateIn: flow required PackState [queued: true, queueLength: 5]
+    port limitsIn: flow required ChargeLimits [queued: true, queueLength: 5]
+    port faultLogIn: flow required FaultLog [queued: true, queueLength: 2]
+    port chargeRequestOut: flow provided ChargeRequest
+    port canTxOut: flow provided byte
+    port canRxIn: flow required byte
+
+    behavior CyclicVCUReport {
+      trigger: periodic "10ms"
+      budget: "2ms"
+      access: [packStateIn: read, limitsIn: read, canTxOut: write]
+    }
+
+    behavior CyclicChargerComm {
+      trigger: periodic "100ms"
+      budget: "3ms"
+      access: [limitsIn: read, canRxIn: read, chargeRequestOut: write, canTxOut: write]
+    }
+  }
+
+  // =========================================================================
+  // SW Connectors
+  // =========================================================================
+
+  // Driver -> Application
+  connect CMICDriver.cellDataOut -> StateEstimationApp.cellDataIn : flow
+  connect CMICDriver.cellDataOut -> BalancingApp.cellDataIn : flow
+  connect CMICDriver.cellDataOut -> SafetyApp.cellDataIn : flow
+  connect CMICDriver.cellStatsOut -> StateEstimationApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> LimitsApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> BalancingApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> ThermalApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> ChargingApp.cellStatsIn : flow
+  connect CMICDriver.cellStatsOut -> SafetyApp.cellStatsIn : flow
+  connect PackSensorDriver.voltageOut -> StateEstimationApp.voltageIn : flow
+  connect PackSensorDriver.voltageOut -> SafetyApp.voltageIn : flow
+  connect PackSensorDriver.currentOut -> StateEstimationApp.currentIn : flow
+  connect PackSensorDriver.currentOut -> LimitsApp.currentIn : flow
+  connect PackSensorDriver.currentOut -> SafetyApp.currentIn : flow
+  connect PackSensorDriver.isolationOut -> SafetyApp.isolationIn : flow
+  connect CoolantSensorDriver.coolantTempOut -> ThermalApp.coolantTempIn : flow
+  connect CoolantSensorDriver.coolantFlowOut -> ThermalApp.coolantFlowIn : flow
+
+  // Application -> Application
+  connect StateEstimationApp.socOut -> LimitsApp.socIn : flow
+  connect StateEstimationApp.socOut -> ChargingApp.socIn : flow
+  connect StateEstimationApp.packStateOut -> DiagnosticsApp.packStateIn : flow
+  connect StateEstimationApp.packStateOut -> CANCommsApp.packStateIn : flow
+  connect LimitsApp.limitsOut -> ChargingApp.limitsIn : flow
+  connect LimitsApp.limitsOut -> CANCommsApp.limitsIn : flow
+  connect SafetyApp.faultOut -> DiagnosticsApp.faultIn : flow
+  connect CANCommsApp.chargeRequestOut -> ChargingApp.chargeRequestIn : flow
+
+  // Application -> Driver
+  connect BalancingApp.balancingCmdOut -> CMICDriver.balancingCmdIn : flow
+  connect SafetyApp.contactorCmdOut -> ContactorDriver.contactorCmdIn : flow
+  connect ThermalApp.thermalCmdOut -> CoolantActuatorDriver.thermalCmdIn : flow
+  connect ChargingApp.contactorCmdOut -> ContactorDriver.contactorCmdIn : flow
+}
