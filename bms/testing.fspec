@@ -1,0 +1,290 @@
+// -----------------------------------------------------------------------------
+// Testing (T Layer)
+// -----------------------------------------------------------------------------
+// HIL/SIL test specifications for the Battery Management System.
+// Covers cell monitoring, thermal protection, fault isolation, and charging.
+
+// =============================================================================
+// Test Configurations
+// =============================================================================
+
+// Full HIL setup: BMSMasterECU as EUT, CMICs and actuators simulated
+test-config HIL-BMS-Full {
+  eut: BMSMasterECU
+  type: hil
+  bus: can0
+  simulated: [CMIC_Chain1, CMIC_Chain2, CMIC_Chain3, CoolantPump, CoolantValve, MainContactorPos, MainContactorNeg, PrechargeRelay]
+}
+
+// Focused HIL for contactor/safety tests
+test-config HIL-BMS-Safety {
+  eut: BMSMasterECU
+  type: hil
+  bus: can0
+  simulated: [MainContactorPos, MainContactorNeg, PrechargeRelay, HVCurrentSensor, IsolationMonitorIC]
+}
+
+// SIL for algorithm validation (SOC/SOH estimation, balancing)
+test-config SIL-BMS-Algo {
+  eut: BMSMasterECU
+  type: sil
+}
+
+// =============================================================================
+// Cell Monitoring Tests
+// =============================================================================
+
+test T-CM-01 "Cell Voltage Accuracy" {
+  verifies: BMS-001
+  config: HIL-BMS-Full
+  priority: critical
+  precondition {
+    state: monitoring
+    signal: "AllCMICs online"
+  }
+  stimulus {
+    send: CellVoltageRead
+    data: "Module: 0, Cell: 0..3, Voltage: 3.700V"
+  }
+  expected {
+    signal: "abs(MeasuredVoltage - 3.700) < 0.002"
+    within: "100ms"
+  }
+}
+
+test T-CM-02 "Cell Temperature Accuracy" {
+  verifies: BMS-002
+  config: HIL-BMS-Full
+  priority: critical
+  precondition {
+    signal: "NTC sensors calibrated"
+  }
+  stimulus {
+    send: TempSensorRead
+    data: "Module: 0, Temperature: 25.0"
+  }
+  expected {
+    signal: "abs(MeasuredTemp - 25.0) < 1.0"
+    within: "1000ms"
+  }
+}
+
+// =============================================================================
+// State Estimation Tests
+// =============================================================================
+
+test T-SOC-01 "SOC Estimation Accuracy" {
+  verifies: BMS-010
+  config: SIL-BMS-Algo
+  priority: critical
+  precondition {
+    state: monitoring
+    signal: "SOC_Reference == 80%"
+  }
+  expected {
+    signal: "abs(SOC_Estimated - SOC_Reference) < 3"
+  }
+}
+
+test T-SOH-01 "SOH Trend Detection" {
+  verifies: BMS-011
+  config: SIL-BMS-Algo
+  priority: high
+  stimulus {
+    send: AgingSimulation
+    data: "Cycles: 500, CapacityFade: 5%"
+  }
+  expected {
+    signal: "SOH < 95%"
+  }
+}
+
+// =============================================================================
+// Safety / Protection Tests
+// =============================================================================
+
+test T-OV-01 "Overvoltage Contactor Open" {
+  verifies: BMS-020
+  config: HIL-BMS-Safety
+  priority: critical
+  precondition {
+    state: monitoring
+    signal: "Contactors closed"
+  }
+  stimulus {
+    send: CellVoltageRead
+    data: "Cell: 42, Voltage: 4.25V"
+  }
+  expected {
+    signal: "ContactorState == open AND FaultCode == OVERVOLTAGE"
+    within: "100ms"
+  }
+}
+
+test T-UV-01 "Undervoltage Power Reduction" {
+  verifies: BMS-021
+  config: HIL-BMS-Safety
+  priority: critical
+  stimulus {
+    send: CellVoltageRead
+    data: "Cell: 17, Voltage: 2.45V"
+  }
+  expected {
+    signal: "PowerLimit < 50% AND DriverWarning == active"
+    within: "200ms"
+  }
+}
+
+test T-OC-01 "Overcurrent Protection" {
+  verifies: BMS-022
+  config: HIL-BMS-Safety
+  priority: critical
+  stimulus {
+    send: CurrentRead
+    data: "PackCurrent: 650A"
+  }
+  expected {
+    signal: "ContactorState == open"
+    within: "10ms"
+  }
+}
+
+test T-OT-01 "Overtemperature Thermal Shutdown" {
+  verifies: BMS-023
+  config: HIL-BMS-Full
+  priority: critical
+  precondition {
+    state: monitoring
+  }
+  stimulus {
+    send: TempSensorRead
+    data: "Module: 5, Temperature: 62"
+  }
+  expected {
+    signal: "CoolantPump == max AND PowerLimit < 20%"
+    within: "500ms"
+  }
+}
+
+test T-ISO-01 "Isolation Fault Detection" {
+  verifies: BMS-024
+  config: HIL-BMS-Safety
+  priority: critical
+  stimulus {
+    send: IsolationRead
+    data: "Resistance: 400 Ohm/V"
+  }
+  expected {
+    signal: "FaultCode == ISOLATION_FAULT AND ContactorState == open"
+    within: "1000ms"
+  }
+}
+
+// =============================================================================
+// Thermal Management Tests
+// =============================================================================
+
+test T-TM-01 "Cooling Activation" {
+  verifies: BMS-030
+  config: HIL-BMS-Full
+  priority: high
+  precondition {
+    signal: "CoolantPump == off"
+  }
+  stimulus {
+    send: TempSensorRead
+    data: "Module: 0, Temperature: 36"
+  }
+  expected {
+    signal: "CoolantPump == on AND CoolantValve == open"
+    within: "2000ms"
+  }
+}
+
+// =============================================================================
+// Charging Tests
+// =============================================================================
+
+test T-CHG-01 "CC-CV Charge Profile" {
+  verifies: BMS-050
+  config: HIL-BMS-Full
+  priority: high
+  precondition {
+    state: charging
+    signal: "SOC < 80%"
+  }
+  expected {
+    signal: "ChargeMode == CC AND ChargeCurrent == MaxAllowed"
+  }
+}
+
+test T-DCFC-01 "DC Fast Charge CCS Protocol" {
+  verifies: BMS-051
+  config: HIL-BMS-Full
+  priority: high
+  precondition {
+    state: idle
+  }
+  stimulus {
+    send: ChargerConnect
+    data: "Protocol: CCS, MaxPower: 150kW"
+  }
+  expected {
+    signal: "ChargeState == active AND PrechargeComplete"
+    within: "5000ms"
+  }
+}
+
+// =============================================================================
+// Integration Test Sequences
+// =============================================================================
+
+test-sequence T-INT-BMS-01 "Full System Power-On" {
+  verifies: [BMS-110, BMS-080]
+  type: system
+  ecus: [BMSMasterECU, CMIC_Chain1, CMIC_Chain2, CMIC_Chain3]
+  step "Apply 12V to BMSMasterECU"
+  step "Verify POST (Power-On Self Test)" {
+    expected: "POST pass within 2s, all CMICs responding"
+  }
+  step "Close precharge relay" {
+    expected: "Precharge voltage > 90% of pack voltage"
+  }
+  step "Close main contactors" {
+    expected: "HV bus live, isolation OK"
+  }
+  step "Begin cell monitoring at 10 Hz" {
+    expected: "All 432 cell voltages in range 2.5V..4.2V"
+  }
+}
+
+test-sequence T-INT-BMS-02 "Thermal Runaway Response" {
+  verifies: [BMS-023, BMS-081]
+  type: system
+  ecus: [BMSMasterECU, CoolantPump, MainContactorPos, MainContactorNeg]
+  step "Normal operation at 30A discharge"
+  step "Inject rapid temperature rise on Module 12" {
+    expected: "Cooling to maximum within 500ms"
+  }
+  step "Temperature exceeds 60°C" {
+    expected: "Power derated to 20%"
+  }
+  step "Temperature exceeds 80°C" {
+    expected: "Contactors opened, safe shutdown initiated"
+  }
+  step "Verify fault logged with timestamp"
+}
+
+test-sequence T-INT-BMS-03 "Cell Balancing Cycle" {
+  verifies: BMS-040
+  type: integration
+  ecus: [BMSMasterECU, CMIC_Chain1]
+  step "Charge to SOC 95%"
+  step "Identify cells with voltage > mean + 10mV" {
+    expected: "Balancing FETs activated for high cells"
+  }
+  step "Wait for balancing period"
+  step "Verify cell voltage spread" {
+    expected: "Max cell delta < 5mV"
+  }
+}
