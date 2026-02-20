@@ -1,0 +1,360 @@
+// -----------------------------------------------------------------------------
+// Logical Architecture (L Layer)
+// -----------------------------------------------------------------------------
+
+logical "BMS Architecture" {
+
+  // =========================================================================
+  // Cell Monitoring Subsystem (distributed on CMICs)
+  // =========================================================================
+
+  component CellMonitoringSubsystem: subsystem {
+    port cellData: flow provided
+    port cellStats: flow provided
+    port balancingCmd: flow required
+    port diagnostics: service provided
+    integrity: "ASIL_C"
+
+    component CellMonitorIC: block {
+      port voltages: flow provided
+      port temperatures: flow provided
+      port balancing: flow required
+      // Represents one CMIC monitoring 12 cells (one per 3 modules)
+    }
+
+    component CellAggregator: block {
+      port rawCellData: flow required
+      port aggregatedData: flow provided
+      port stats: flow provided
+    }
+
+    connect CellMonitorIC.voltages -> CellAggregator.rawCellData : flow
+    connect CellAggregator.aggregatedData -> cellData : delegation
+    connect CellAggregator.stats -> cellStats : delegation
+    connect balancingCmd -> CellMonitorIC.balancing : delegation
+  }
+
+  // =========================================================================
+  // Pack Measurement Subsystem
+  // =========================================================================
+
+  component PackMeasurementSubsystem: subsystem {
+    port packVoltage: flow provided
+    port packCurrent: flow provided
+    port isolation: flow provided
+    integrity: "ASIL_D"
+
+    component VoltageSensor: block {
+      port voltageOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component CurrentSensor: block {
+      port currentOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component IsolationMonitor: block {
+      port isoOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    connect VoltageSensor.voltageOut -> packVoltage : delegation
+    connect CurrentSensor.currentOut -> packCurrent : delegation
+    connect IsolationMonitor.isoOut -> isolation : delegation
+  }
+
+  // =========================================================================
+  // BMS Controller (central processing)
+  // =========================================================================
+
+  component BMSController: subsystem {
+    port cellDataIn: flow required
+    port cellStatsIn: flow required
+    port packVoltageIn: flow required
+    port packCurrentIn: flow required
+    port isolationIn: flow required
+    port coolantTempIn: flow required
+    port coolantFlowIn: flow required
+    port chargeRequestIn: flow required
+    port contactorCmdOut: flow provided
+    port balancingCmdOut: flow provided
+    port thermalCmdOut: flow provided
+    port chargeLimitsOut: flow provided
+    port vcuReportOut: flow provided
+    port faultAlertOut: flow provided
+    port faultLogOut: service provided
+    port diagPort: service bidirectional
+
+    integrity: "ASIL_D"
+
+    component StateEstimator: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port voltageIn: flow required
+      port currentIn: flow required
+      port socOut: flow provided
+      port sohOut: flow provided
+      port energyOut: flow provided
+    }
+
+    component LimitsCalculator: block {
+      port socIn: flow required
+      port cellStatsIn: flow required
+      port currentIn: flow required
+      port limitsOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    component BalancingController: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port balancingCmdOut: flow provided
+    }
+
+    component ThermalController: block {
+      port cellStatsIn: flow required
+      port coolantTempIn: flow required
+      port coolantFlowIn: flow required
+      port thermalCmdOut: flow provided
+    }
+
+    component ChargingController: block {
+      port socIn: flow required
+      port limitsIn: flow required
+      port cellStatsIn: flow required
+      port chargeRequestIn: flow required
+      port chargeLimitsOut: flow provided
+      port contactorCmdOut: flow provided
+    }
+
+    component SafetyManager: block {
+      port cellDataIn: flow required
+      port cellStatsIn: flow required
+      port voltageIn: flow required
+      port currentIn: flow required
+      port isolationIn: flow required
+      port contactorCmdOut: flow provided
+      port faultOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component DiagnosticsController: block {
+      port faultIn: flow required
+      port diagPort: service bidirectional
+      port logOut: service provided
+    }
+
+    // --- Internal connections ---
+
+    // Sensor data distribution (input delegations: parent required → child required)
+    connect cellDataIn -> StateEstimator.cellDataIn : delegation
+    connect cellDataIn -> BalancingController.cellDataIn : delegation
+    connect cellDataIn -> SafetyManager.cellDataIn : delegation
+    connect cellStatsIn -> StateEstimator.cellStatsIn : delegation
+    connect cellStatsIn -> LimitsCalculator.cellStatsIn : delegation
+    connect cellStatsIn -> BalancingController.cellStatsIn : delegation
+    connect cellStatsIn -> ThermalController.cellStatsIn : delegation
+    connect cellStatsIn -> ChargingController.cellStatsIn : delegation
+    connect cellStatsIn -> SafetyManager.cellStatsIn : delegation
+    connect packVoltageIn -> StateEstimator.voltageIn : delegation
+    connect packVoltageIn -> SafetyManager.voltageIn : delegation
+    connect packCurrentIn -> StateEstimator.currentIn : delegation
+    connect packCurrentIn -> LimitsCalculator.currentIn : delegation
+    connect packCurrentIn -> SafetyManager.currentIn : delegation
+    connect isolationIn -> SafetyManager.isolationIn : delegation
+    connect coolantTempIn -> ThermalController.coolantTempIn : delegation
+    connect coolantFlowIn -> ThermalController.coolantFlowIn : delegation
+    connect chargeRequestIn -> ChargingController.chargeRequestIn : delegation
+
+    // Internal processing flows
+    connect StateEstimator.socOut -> LimitsCalculator.socIn : flow
+    connect StateEstimator.socOut -> ChargingController.socIn : flow
+    connect LimitsCalculator.limitsOut -> ChargingController.limitsIn : flow
+
+    // Output delegations
+    connect SafetyManager.contactorCmdOut -> contactorCmdOut : delegation
+    connect BalancingController.balancingCmdOut -> balancingCmdOut : delegation
+    connect ThermalController.thermalCmdOut -> thermalCmdOut : delegation
+    connect ChargingController.chargeLimitsOut -> chargeLimitsOut : delegation
+    connect SafetyManager.faultOut -> DiagnosticsController.faultIn : flow
+    connect SafetyManager.faultOut -> faultAlertOut : delegation
+    connect DiagnosticsController.logOut -> faultLogOut : delegation
+    connect DiagnosticsController.diagPort -> diagPort : delegation
+  }
+
+  // =========================================================================
+  // Actuator Subsystems
+  // =========================================================================
+
+  component ContactorSubsystem: subsystem {
+    port contactorCmd: flow required
+    port contactorFeedback: flow provided
+    integrity: "ASIL_D"
+
+    component MainContactor: block {
+      port cmdIn: flow required
+      port feedbackOut: flow provided
+      integrity: "ASIL_D"
+    }
+
+    component PrechargeContactor: block {
+      port cmdIn: flow required
+      port feedbackOut: flow provided
+    }
+
+    connect contactorCmd -> MainContactor.cmdIn : delegation
+    connect contactorCmd -> PrechargeContactor.cmdIn : delegation
+  }
+
+  component ThermalSubsystem: subsystem {
+    port thermalCmd: flow required
+    port coolantData: flow provided
+
+    component CoolantPump: block {
+      port dutyIn: flow required
+      port flowOut: flow provided
+    }
+
+    component CoolantValve: block {
+      port positionIn: flow required
+    }
+
+    component HeatingElement: block {
+      port powerIn: flow required
+    }
+
+    connect thermalCmd -> CoolantPump.dutyIn : delegation
+    connect thermalCmd -> CoolantValve.positionIn : delegation
+    connect thermalCmd -> HeatingElement.powerIn : delegation
+  }
+
+  // =========================================================================
+  // Communication Subsystem
+  // =========================================================================
+
+  component CommunicationSubsystem: module {
+    port vcuData: flow required
+    port chargerData: flow bidirectional
+    port diagData: service bidirectional
+    port canBusOut: flow provided
+  }
+
+  // =========================================================================
+  // Power State Manager
+  // =========================================================================
+
+  component PowerStateManager: module {
+    port faultIn: flow required
+    port selfTestIn: flow required
+    port wakeupIn: flow required
+    port stateOut: flow provided
+    port contactorCtrl: flow provided
+    integrity: "ASIL_C"
+  }
+
+  // =========================================================================
+  // Insulation Monitor Subsystem (dedicated IMD)
+  // =========================================================================
+
+  component InsulationMonitorSubsystem: subsystem {
+    port rawIsolation: flow required
+    port isolationOut: flow provided
+    integrity: "ASIL_C"
+
+    component IsolationSensor: block {
+      port rawIn: flow required
+      port measuredOut: flow provided
+      integrity: "ASIL_C"
+    }
+
+    component IsolationEvaluator: block {
+      port measuredIn: flow required
+      port statusOut: flow provided
+    }
+
+    connect rawIsolation -> IsolationSensor.rawIn : delegation
+    connect IsolationSensor.measuredOut -> IsolationEvaluator.measuredIn : flow
+    connect IsolationEvaluator.statusOut -> isolationOut : delegation
+  }
+
+  // =========================================================================
+  // Data Logger Module
+  // =========================================================================
+
+  component DataLoggerModule: module {
+    port cellDataIn: flow required
+    port faultIn: flow required
+
+    component FlashController: block {
+      port dataIn: flow required
+      port writeCmd: flow provided
+    }
+
+    component EventBuffer: block {
+      port eventIn: flow required
+      port bufferedOut: flow provided
+    }
+
+    connect faultIn -> EventBuffer.eventIn : delegation
+    connect EventBuffer.bufferedOut -> FlashController.dataIn : flow
+  }
+
+  // =========================================================================
+  // Wakeup Controller
+  // =========================================================================
+
+  component WakeupController: module {
+    port wakeupIn: flow required
+    port powerOut: flow provided
+  }
+
+  // =========================================================================
+  // Self-Test Module
+  // =========================================================================
+
+  component SelfTestModule: module {
+    port testIn: flow required
+    port testOut: flow provided
+    integrity: "ASIL_B"
+  }
+
+  // =========================================================================
+  // Top-level connections
+  // =========================================================================
+
+  // Existing connections
+  connect CellMonitoringSubsystem.cellData -> BMSController.cellDataIn
+  connect CellMonitoringSubsystem.cellStats -> BMSController.cellStatsIn
+  connect PackMeasurementSubsystem.packVoltage -> BMSController.packVoltageIn
+  connect PackMeasurementSubsystem.packCurrent -> BMSController.packCurrentIn
+  connect PackMeasurementSubsystem.isolation -> BMSController.isolationIn
+  connect BMSController.contactorCmdOut -> ContactorSubsystem.contactorCmd
+  connect BMSController.balancingCmdOut -> CellMonitoringSubsystem.balancingCmd
+  connect BMSController.thermalCmdOut -> ThermalSubsystem.thermalCmd
+  connect BMSController.vcuReportOut -> CommunicationSubsystem.vcuData
+  connect BMSController.chargeLimitsOut -> CommunicationSubsystem.chargerData
+
+  // New connections for added components
+  connect BMSController.faultAlertOut -> PowerStateManager.faultIn
+  connect SelfTestModule.testOut -> PowerStateManager.selfTestIn
+  connect WakeupController.powerOut -> PowerStateManager.wakeupIn
+  connect PowerStateManager.contactorCtrl -> ContactorSubsystem.contactorCmd
+  connect PowerStateManager.stateOut -> CommunicationSubsystem.vcuData
+  connect InsulationMonitorSubsystem.isolationOut -> BMSController.isolationIn
+  connect CellMonitoringSubsystem.cellData -> DataLoggerModule.cellDataIn
+  connect BMSController.faultAlertOut -> DataLoggerModule.faultIn
+
+  // Interfaces
+  interface ICellMonitoring {
+    ports: [CellMonitoringSubsystem.cellData, BMSController.cellDataIn]
+  }
+
+  interface IPackMeasurement {
+    ports: [PackMeasurementSubsystem.packVoltage, BMSController.packVoltageIn]
+  }
+
+  interface IContactorControl {
+    ports: [BMSController.contactorCmdOut, ContactorSubsystem.contactorCmd]
+  }
+}
