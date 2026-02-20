@@ -1,0 +1,163 @@
+// =============================================================================
+// BMS Views — Filtered diagram perspectives
+// =============================================================================
+
+// =============================================================================
+// Functional Layer Views
+// =============================================================================
+
+// Safety-relevante Funktionen (ASIL C/D)
+// Zeigt nur die sicherheitsrelevante Kette: Sensoren → Überwachung → Kontaktoren
+view "Safety Chain" {
+  type: custom
+  layer: functional
+  include: [MeasurePackElectrical, AcquireCellData, SuperviseSafety, ComputeLimits, DriveContactors]
+  ports: connected
+}
+
+// Thermomanagement im Kontext: ControlThermal + direkte Nachbarn
+view "Thermal Management" {
+  type: context
+  layer: functional
+  focus: ControlThermal
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// State-Estimation-Kette: Messung → Schätzung → Limitberechnung
+view "SOC/SOH Estimation" {
+  type: custom
+  layer: functional
+  include: [AcquireCellData, MeasurePackElectrical, EstimateState, ComputeLimits]
+  ports: connected
+}
+
+// Ladesteuerung im Kontext: ControlCharging + alle Zulieferer und Abnehmer
+view "Charging Control" {
+  type: context
+  layer: functional
+  focus: ControlCharging
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// Nur Eingangs- und Ausgangs-Funktionen (Sense + Act), ohne Verarbeitungslogik
+view "Sense-Act Overview" {
+  type: custom
+  layer: functional
+  include: [AcquireCellData, MeasurePackElectrical, MeasureCoolant, MonitorInsulation, DriveContactors, DriveBalancing, DriveCoolant, ReportToVCU]
+  ports: connected
+}
+
+// Verwaltungs- und Management-Funktionen (State Machine, Wakeup, Self-Test, Logging)
+view "System Management" {
+  type: custom
+  layer: functional
+  include: [ManagePowerState, CoordinateWakeup, PerformSelfTest, ManageDiagnostics, LogData]
+  ports: connected
+}
+
+// =============================================================================
+// Logical Layer Views
+// =============================================================================
+
+// Alle sicherheitskritischen Komponenten (ASIL C/D)
+view "Safety Critical Components" {
+  type: custom
+  layer: logical
+  include: [BMSController, PackMeasurementSubsystem, ContactorSubsystem, PowerStateManager]
+  ports: connected
+}
+
+// BMSController im Kontext: zeigt alle Subsysteme die an den Controller angebunden sind
+view "BMSController Context" {
+  type: context
+  layer: logical
+  focus: BMSController
+  depth: 1
+  direction: both
+  ports: connected
+}
+
+// Alle Datenerfassungs-Subsysteme
+view "Sensing Subsystems" {
+  type: custom
+  layer: logical
+  include: [CellMonitoringSubsystem, PackMeasurementSubsystem, InsulationMonitorSubsystem]
+  ports: connected
+}
+
+// =============================================================================
+// Physical Layer Views
+// =============================================================================
+
+// isoSPI-Bustopologie: Master-ECU + Cell Monitoring IC Chains
+view "isoSPI Network" {
+  type: custom
+  layer: physical
+  include: [BMSMasterECU, CMIC_Chain1, CMIC_Chain2, CMIC_Chain3]
+}
+
+// BMSMasterECU im Kontext: alle direkt verbundenen Sensoren, Aktoren, Gateways
+view "Master ECU Context" {
+  type: context
+  layer: physical
+  focus: BMSMasterECU
+  depth: 1
+  direction: both
+}
+
+// Hochvolt-Leistungspfad: Spannungs-/Strommessung + Kontaktoren
+view "HV Power Path" {
+  type: custom
+  layer: physical
+  include: [HVVoltageSensor, HVCurrentSensor, MainContactorPos, MainContactorNeg, PrechargeRelay]
+}
+
+// =============================================================================
+// Chain Views — Cross-layer traceability
+// =============================================================================
+
+// Überspannungsschutz: BMS-020 → SuperviseSafety → SafetyManager → BMSMasterECU
+view "Overvoltage Protection Chain" {
+  type: chain
+  start: BMS-020
+  direction: forward
+}
+
+// Thermomanagement: BMS-030 → ControlThermal → ThermalSubsystem → CoolantPump/Valve
+view "Thermal Chain" {
+  type: chain
+  start: BMS-030
+  direction: forward
+}
+
+// BMSMasterECU rückwärts: Welche Funktionen und Requirements laufen auf dem Master?
+view "Master ECU Traceability" {
+  type: chain
+  start: BMSMasterECU
+  direction: backward
+}
+
+// Zellspannungsmessung: BMS-001 → MeasureCellVoltages → CellMonitorIC → CMIC_Chain
+view "Cell Monitoring Chain" {
+  type: chain
+  start: BMS-001
+  direction: forward
+}
+
+// SOC-Schätzung: BMS-010 → EstimateSOC → StateEstimator → BMSMasterECU
+view "SOC Estimation Chain" {
+  type: chain
+  start: BMS-010
+  direction: forward
+}
+
+// Ladekontrolle: BMS-050 → NegotiateChargePower → ChargingController → BMSMasterECU
+view "Charging Chain" {
+  type: chain
+  start: BMS-050
+  direction: forward
+}
