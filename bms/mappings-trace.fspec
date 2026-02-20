@@ -1,0 +1,279 @@
+// -----------------------------------------------------------------------------
+// Allocations (F -> L)
+// -----------------------------------------------------------------------------
+
+allocations {
+
+  // --- Sense functions -> Logical components ---
+
+  AcquireCellData -> CellMonitoringSubsystem [type: full]
+  AcquireCellData.MeasureCellVoltages -> CellMonitoringSubsystem.CellMonitorIC [type: full]
+  AcquireCellData.MeasureCellTemperatures -> CellMonitoringSubsystem.CellMonitorIC [type: full]
+  AcquireCellData.CalcCellStatistics -> CellMonitoringSubsystem.CellAggregator [type: full]
+
+  MeasurePackElectrical -> PackMeasurementSubsystem [type: full]
+  MeasureCoolant -> ThermalSubsystem [type: partial]
+
+  // --- Think functions -> BMSController sub-components ---
+
+  EstimateState -> BMSController [type: full]
+  EstimateState.EstimateSOC -> BMSController.StateEstimator [type: full]
+  EstimateState.EstimateSOH -> BMSController.StateEstimator [type: full]
+  EstimateState.CalcEnergy -> BMSController.StateEstimator [type: full]
+
+  ComputeLimits -> BMSController [type: full]
+  ComputeLimits.CalcCurrentLimits -> BMSController.LimitsCalculator [type: full]
+  ComputeLimits.DeratePower -> BMSController.LimitsCalculator [type: full]
+
+  ControlBalancing -> BMSController.BalancingController [type: full]
+  ControlBalancing.SelectCellsForBalancing -> BMSController.BalancingController [type: full]
+  ControlBalancing.CalcBalancingDuty -> BMSController.BalancingController [type: full]
+
+  ControlThermal -> BMSController.ThermalController [type: full]
+  ControlThermal.DetermineAction -> BMSController.ThermalController [type: full]
+  ControlThermal.CalcPumpValve -> BMSController.ThermalController [type: full]
+
+  ControlCharging -> BMSController.ChargingController [type: full]
+  ControlCharging.NegotiateChargePower -> BMSController.ChargingController [type: full]
+  ControlCharging.ControlPrecharge -> BMSController.ChargingController [type: partial]
+
+  SuperviseSafety -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckCellLimits -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckPackLimits -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.CheckIsolation -> BMSController.SafetyManager [type: full]
+  SuperviseSafety.DecideContactor -> BMSController.SafetyManager [type: full]
+
+  ManageDiagnostics -> BMSController.DiagnosticsController [type: full]
+
+  // --- Act functions -> Actuator subsystems ---
+
+  DriveContactors -> ContactorSubsystem [type: full]
+  DriveBalancing -> CellMonitoringSubsystem [type: partial]
+  DriveCoolant -> ThermalSubsystem [type: full]
+  ReportToVCU -> CommunicationSubsystem [type: full]
+
+  // --- New function allocations ---
+
+  ManagePowerState -> PowerStateManager [type: full]
+  MonitorInsulation -> InsulationMonitorSubsystem [type: full]
+  MonitorInsulation.MeasureIsolationResistance -> InsulationMonitorSubsystem.IsolationSensor [type: full]
+  MonitorInsulation.EvaluateIsolationStatus -> InsulationMonitorSubsystem.IsolationEvaluator [type: full]
+  LogData -> DataLoggerModule [type: full]
+  LogData.RecordCellHistory -> DataLoggerModule.FlashController [type: full]
+  LogData.StoreEventLog -> DataLoggerModule.EventBuffer [type: full]
+  CoordinateWakeup -> WakeupController [type: full]
+  PerformSelfTest -> SelfTestModule [type: full]
+
+  // --- Interface allocations ---
+
+  interface CellSensorInterface -> CellMonitoringSubsystem.cellData [mapping: direct]
+  interface PackSensorInterface -> PackMeasurementSubsystem.packVoltage [mapping: direct]
+  interface ContactorInterface -> ContactorSubsystem.contactorCmd [mapping: direct]
+  interface VCUInterface -> CommunicationSubsystem.canBusOut [mapping: direct]
+  interface ChargerInterface -> CommunicationSubsystem.chargerData [mapping: direct]
+
+  // --- Flow allocations ---
+
+  flow AcquireCellData.cellDataOut->EstimateState.cellDataIn
+    -> CellMonitoringSubsystem.cellData->BMSController.cellDataIn [type: direct]
+
+  flow AcquireCellData.cellDataOut->SuperviseSafety.cellDataIn
+    -> CellMonitoringSubsystem.cellData->BMSController.cellDataIn [type: direct]
+
+  flow MeasurePackElectrical.voltageOut->SuperviseSafety.voltageIn
+    -> PackMeasurementSubsystem.packVoltage->BMSController.packVoltageIn [type: direct]
+
+  flow SuperviseSafety.contactorCmdOut->DriveContactors.contactorCmdIn
+    -> BMSController.contactorCmdOut->ContactorSubsystem.contactorCmd [type: direct]
+}
+
+// -----------------------------------------------------------------------------
+// Realizations (L -> P)
+// -----------------------------------------------------------------------------
+
+realizations {
+
+  // --- Sensor subsystems -> Physical nodes ---
+
+  CellMonitoringSubsystem -> CMIC_Chain1 [type: hardware]
+  CellMonitoringSubsystem -> CMIC_Chain2 [type: hardware]
+  CellMonitoringSubsystem -> CMIC_Chain3 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain1 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain2 [type: hardware]
+  CellMonitoringSubsystem.CellMonitorIC -> CMIC_Chain3 [type: hardware]
+  CellMonitoringSubsystem.CellAggregator -> BMSMasterECU [type: software]
+
+  PackMeasurementSubsystem -> HVVoltageSensor [type: hardware]
+  PackMeasurementSubsystem -> HVCurrentSensor [type: hardware]
+  PackMeasurementSubsystem.VoltageSensor -> HVVoltageSensor [type: hardware]
+  PackMeasurementSubsystem.CurrentSensor -> HVCurrentSensor [type: hardware]
+  PackMeasurementSubsystem.IsolationMonitor -> IsolationMonitorIC [type: hardware]
+
+  // --- BMS Controller -> Master ECU (all software) ---
+
+  BMSController -> BMSMasterECU [type: software]
+  BMSController.StateEstimator -> BMSMasterECU [type: software]
+  BMSController.LimitsCalculator -> BMSMasterECU [type: software]
+  BMSController.BalancingController -> BMSMasterECU [type: software]
+  BMSController.ThermalController -> BMSMasterECU [type: software]
+  BMSController.ChargingController -> BMSMasterECU [type: software]
+  BMSController.SafetyManager -> BMSMasterECU [type: software]
+  BMSController.DiagnosticsController -> BMSMasterECU [type: software]
+
+  // --- Actuator subsystems -> Physical actuators ---
+
+  ContactorSubsystem -> MainContactorPos [type: hardware]
+  ContactorSubsystem -> MainContactorNeg [type: hardware]
+  ContactorSubsystem -> PrechargeRelay [type: hardware]
+  ContactorSubsystem.MainContactor -> MainContactorPos [type: hardware]
+  ContactorSubsystem.MainContactor -> MainContactorNeg [type: hardware]
+  ContactorSubsystem.PrechargeContactor -> PrechargeRelay [type: hardware]
+
+  ThermalSubsystem -> CoolantPump [type: hardware]
+  ThermalSubsystem -> CoolantValve [type: hardware]
+  ThermalSubsystem.CoolantPump -> CoolantPump [type: hardware]
+  ThermalSubsystem.CoolantValve -> CoolantValve [type: hardware]
+
+  // --- Communication -> Master ECU ---
+
+  CommunicationSubsystem -> BMSMasterECU [type: software]
+
+  // --- New component realizations ---
+
+  PowerStateManager -> BMSMasterECU [type: software]
+  InsulationMonitorSubsystem -> IsolationMonitorIC [type: hardware]
+  InsulationMonitorSubsystem -> BMSMasterECU [type: software]
+  InsulationMonitorSubsystem.IsolationSensor -> IsolationMonitorIC [type: hardware]
+  InsulationMonitorSubsystem.IsolationEvaluator -> BMSMasterECU [type: software]
+  DataLoggerModule -> BMSMasterECU [type: software]
+  DataLoggerModule.FlashController -> FlashMemoryIC [type: hardware]
+  DataLoggerModule.EventBuffer -> BMSMasterECU [type: software]
+  WakeupController -> BMSMasterECU [type: software]
+  SelfTestModule -> BMSMasterECU [type: software]
+}
+
+// -----------------------------------------------------------------------------
+// Trace Links
+// -----------------------------------------------------------------------------
+
+trace {
+
+  // =========================================================================
+  // Requirements -> Functional
+  // =========================================================================
+
+  BMS-001 satisfiedBy AcquireCellData.MeasureCellVoltages
+  BMS-002 satisfiedBy AcquireCellData.MeasureCellTemperatures
+  BMS-010 satisfiedBy EstimateState.EstimateSOC
+  BMS-011 satisfiedBy EstimateState.EstimateSOH
+  BMS-020 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-020 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-021 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-021 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-022 satisfiedBy SuperviseSafety.CheckPackLimits
+  BMS-022 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-023 satisfiedBy SuperviseSafety.CheckCellLimits
+  BMS-024 satisfiedBy SuperviseSafety.CheckIsolation
+  BMS-030 satisfiedBy ControlThermal
+  BMS-031 satisfiedBy ControlThermal.DetermineAction
+  BMS-040 satisfiedBy ControlBalancing
+  BMS-050 satisfiedBy ControlCharging.NegotiateChargePower
+  BMS-051 satisfiedBy ControlCharging
+  BMS-060 satisfiedBy ManageDiagnostics
+  BMS-061 satisfiedBy SuperviseSafety.DecideContactor
+  BMS-070 satisfiedBy ReportToVCU
+  BMS-071 satisfiedBy ManageDiagnostics
+  BMS-080 satisfiedBy ManagePowerState
+  BMS-081 satisfiedBy ManagePowerState.CoordinateShutdown
+  BMS-090 satisfiedBy MonitorInsulation
+  BMS-090 satisfiedBy MonitorInsulation.MeasureIsolationResistance
+  BMS-100 satisfiedBy LogData
+  BMS-100 satisfiedBy LogData.RecordCellHistory
+  BMS-100 satisfiedBy LogData.StoreEventLog
+  BMS-110 satisfiedBy PerformSelfTest
+  BMS-110 satisfiedBy PerformSelfTest.TestSensorChain
+  BMS-110 satisfiedBy PerformSelfTest.TestActuatorChain
+
+  // =========================================================================
+  // Requirements -> Logical
+  // =========================================================================
+
+  BMS-001 satisfiedBy CellMonitoringSubsystem.CellMonitorIC
+  BMS-002 satisfiedBy CellMonitoringSubsystem.CellMonitorIC
+  BMS-010 satisfiedBy BMSController.StateEstimator
+  BMS-020 satisfiedBy BMSController.SafetyManager
+  BMS-021 satisfiedBy BMSController.SafetyManager
+  BMS-022 satisfiedBy BMSController.SafetyManager
+  BMS-024 satisfiedBy PackMeasurementSubsystem.IsolationMonitor
+  BMS-030 satisfiedBy ThermalSubsystem
+  BMS-040 satisfiedBy BMSController.BalancingController
+  BMS-050 satisfiedBy BMSController.ChargingController
+  BMS-061 satisfiedBy ContactorSubsystem
+  BMS-080 satisfiedBy PowerStateManager
+  BMS-090 satisfiedBy InsulationMonitorSubsystem
+  BMS-100 satisfiedBy DataLoggerModule
+  BMS-110 satisfiedBy SelfTestModule
+
+  // =========================================================================
+  // Requirements -> Software
+  // =========================================================================
+
+  BMS-001 satisfiedBy CMICDriver
+  BMS-010 satisfiedBy StateEstimationApp
+  BMS-020 satisfiedBy SafetyApp
+  BMS-021 satisfiedBy SafetyApp
+  BMS-022 satisfiedBy SafetyApp
+  BMS-023 satisfiedBy SafetyApp
+  BMS-024 satisfiedBy SafetyApp
+  BMS-030 satisfiedBy ThermalApp
+  BMS-040 satisfiedBy BalancingApp
+  BMS-050 satisfiedBy ChargingApp
+  BMS-051 satisfiedBy ChargingApp
+  BMS-060 satisfiedBy DiagnosticsApp
+  BMS-070 satisfiedBy CANCommsApp
+  BMS-071 satisfiedBy DiagnosticsApp
+
+  // =========================================================================
+  // Implementation links
+  // =========================================================================
+
+  CMICDriver implements BMS-001
+  CMICDriver implements BMS-002
+  PackSensorDriver implements BMS-022
+  PackSensorDriver implements BMS-024
+  StateEstimationApp implements BMS-010
+  StateEstimationApp implements BMS-011
+  SafetyApp implements BMS-020
+  SafetyApp implements BMS-021
+  SafetyApp implements BMS-022
+  SafetyApp implements BMS-023
+  SafetyApp implements BMS-024
+  SafetyApp implements BMS-061
+  BalancingApp implements BMS-040
+  ThermalApp implements BMS-030
+  ThermalApp implements BMS-031
+  ChargingApp implements BMS-050
+  ChargingApp implements BMS-051
+  DiagnosticsApp implements BMS-060
+  DiagnosticsApp implements BMS-071
+  CANCommsApp implements BMS-070
+
+  // =========================================================================
+  // Verification links
+  // =========================================================================
+
+  SafetyApp verifies BMS-020
+  SafetyApp verifies BMS-021
+  SafetyApp verifies BMS-022
+  SafetyApp verifies BMS-023
+
+  // =========================================================================
+  // Derivation / refinement
+  // =========================================================================
+
+  BMS-061 derives BMS-020
+  BMS-061 derives BMS-021
+  BMS-023 derives BMS-002
+  BMS-031 derives BMS-030
+  BMS-071 derives BMS-060
+}
