@@ -1,0 +1,199 @@
+// -----------------------------------------------------------------------------
+// Physical Architecture (P Layer)
+// -----------------------------------------------------------------------------
+
+physical "BMS Hardware" {
+
+  // =========================================================================
+  // BMS Master ECU
+  // =========================================================================
+
+  node BMSMasterECU: processing_unit {
+    port isoSPI1: electrical inout [protocol: "isoSPI"]
+    port isoSPI2: electrical inout [protocol: "isoSPI"]
+    port isoSPI3: electrical inout [protocol: "isoSPI"]
+    port can1: electrical inout [protocol: "CAN-FD"]
+    port can2: electrical inout [protocol: "CAN-FD"]
+    port hsd1: electrical out [protocol: "High-Side Driver"]
+    port hsd2: electrical out [protocol: "High-Side Driver"]
+    port pwm1: electrical out [protocol: "PWM"]
+    port pwm2: electrical out [protocol: "PWM"]
+    port adc1: electrical in [protocol: "Analog"]
+    port adc2: electrical in [protocol: "Analog"]
+    port adc3: electrical in [protocol: "Analog"]
+    port eth0: electrical inout [protocol: "100BASE-T1"]
+    resources {
+      cpu: "Infineon AURIX TC397 @300MHz (triple-core lockstep)"
+      memory: "6MB SRAM"
+      storage: "16MB Flash"
+    }
+    integrity: "ASIL_D"
+  }
+
+  // =========================================================================
+  // Cell Monitoring ICs (daisy-chained via isoSPI)
+  // =========================================================================
+
+  node CMIC_Chain1: sensor {
+    // Modules 0..8 (9 CMICs daisy-chained)
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  node CMIC_Chain2: sensor {
+    // Modules 9..17
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  node CMIC_Chain3: sensor {
+    // Modules 18..26
+    port isoSPI: electrical inout [protocol: "isoSPI"]
+    port cellInputs: electrical in [protocol: "Analog"]
+    port balancingOutputs: electrical out [protocol: "FET Switch"]
+    port tempInputs: electrical in [protocol: "NTC Analog"]
+    resources {
+      cpu: "ADBMS6830 (per IC)"
+      memory: "internal"
+    }
+  }
+
+  // =========================================================================
+  // Pack-level sensors
+  // =========================================================================
+
+  node HVVoltageSensor: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_D"
+  }
+
+  node HVCurrentSensor: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_D"
+  }
+
+  node IsolationMonitorIC: sensor {
+    port analogOut: electrical out [protocol: "Analog"]
+    integrity: "ASIL_C"
+  }
+
+  node CoolantTempSensor1: sensor {
+    port analogOut: electrical out [protocol: "NTC Analog"]
+  }
+
+  node CoolantTempSensor2: sensor {
+    port analogOut: electrical out [protocol: "NTC Analog"]
+  }
+
+  node CoolantFlowSensor: sensor {
+    port pulseOut: electrical out [protocol: "Pulse"]
+  }
+
+  // =========================================================================
+  // Actuators
+  // =========================================================================
+
+  node MainContactorPos: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+    integrity: "ASIL_D"
+  }
+
+  node MainContactorNeg: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+    integrity: "ASIL_D"
+  }
+
+  node PrechargeRelay: actuator {
+    port coilIn: electrical in [protocol: "High-Side Driver"]
+  }
+
+  node CoolantPump: actuator {
+    port pwmIn: electrical in [protocol: "PWM"]
+  }
+
+  node CoolantValve: actuator {
+    port pwmIn: electrical in [protocol: "PWM"]
+  }
+
+  // =========================================================================
+  // Physical links
+  // =========================================================================
+
+  link isoSPIChain1: bus {
+    BMSMasterECU.isoSPI1 <-> CMIC_Chain1.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  link isoSPIChain2: bus {
+    BMSMasterECU.isoSPI2 <-> CMIC_Chain2.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  link isoSPIChain3: bus {
+    BMSMasterECU.isoSPI3 <-> CMIC_Chain3.isoSPI
+    [bandwidth: "1Mbit/s", protocol: "isoSPI", topology: "daisy-chain"]
+  }
+
+  node VCUGateway: gateway {
+    port canFD: electrical inout [protocol: "CAN-FD"]
+  }
+
+  node ChargerGateway: gateway {
+    port canFD: electrical inout [protocol: "CAN-FD"]
+  }
+
+  link VehicleCAN: bus {
+    BMSMasterECU.can1 <-> VCUGateway.canFD
+    [bandwidth: "5Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link ChargerCAN: bus {
+    BMSMasterECU.can2 <-> ChargerGateway.canFD
+    [bandwidth: "5Mbit/s", protocol: "CAN-FD"]
+  }
+
+  link PackSensorAnalog: point_to_point {
+    HVVoltageSensor.analogOut <-> BMSMasterECU.adc1
+    HVCurrentSensor.analogOut <-> BMSMasterECU.adc2
+    IsolationMonitorIC.analogOut <-> BMSMasterECU.adc3
+  }
+
+  link ContactorDrive: point_to_point {
+    BMSMasterECU.hsd1 <-> MainContactorPos.coilIn
+    BMSMasterECU.hsd1 <-> MainContactorNeg.coilIn
+    BMSMasterECU.hsd2 <-> PrechargeRelay.coilIn
+  }
+
+  link CoolantPWM: point_to_point {
+    BMSMasterECU.pwm1 <-> CoolantPump.pwmIn
+    BMSMasterECU.pwm2 <-> CoolantValve.pwmIn
+  }
+
+  // =========================================================================
+  // Non-volatile storage
+  // =========================================================================
+
+  node FlashMemoryIC: memory {
+    port spi: electrical inout [protocol: "SPI"]
+    resources {
+      storage: "16MB NOR Flash"
+    }
+  }
+
+  link FlashSPI: bus {
+    BMSMasterECU.eth0 <-> FlashMemoryIC.spi
+    [bandwidth: "40Mbit/s", protocol: "SPI"]
+  }
+}
