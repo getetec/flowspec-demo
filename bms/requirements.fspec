@@ -1,0 +1,240 @@
+// -----------------------------------------------------------------------------
+// Requirements (R Layer)
+// -----------------------------------------------------------------------------
+
+requirements "BMS System Requirements" {
+  spec-type: system_spec
+
+  // --- Cell monitoring ---
+
+  req BMS-001 "Cell Voltage Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall measure individual cell voltages of all 432 cells
+               with an accuracy of ±2 mV at a minimum rate of 10 Hz."
+    integrity: "ASIL_C"
+    quality {
+      metric: "accuracy"
+      target: "2mV"
+      verification: "Calibration test"
+    }
+  }
+
+  req BMS-002 "Cell Temperature Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall measure cell temperatures at a minimum of one
+               sensor per module (27 sensors) with ±1°C accuracy at 1 Hz."
+    integrity: "ASIL_C"
+  }
+
+  // --- State estimation ---
+
+  req BMS-010 "State of Charge Estimation" {
+    type: functional
+    priority: must
+    statement: "The BMS shall estimate pack SOC with an accuracy of ±3%
+               under all operating conditions using Coulomb counting
+               combined with model-based correction."
+    quality {
+      metric: "accuracy"
+      target: "3%"
+      verification: "Drive cycle test"
+    }
+  }
+
+  req BMS-011 "State of Health Estimation" {
+    type: functional
+    priority: should
+    statement: "The BMS shall estimate cell SOH based on internal resistance
+               trends and capacity fade, updated at least once per
+               charge/discharge cycle."
+  }
+
+  // --- Safety and protection ---
+
+  req BMS-020 "Overvoltage Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 10ms if any
+               cell voltage exceeds 4.25 V."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "10ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-021 "Undervoltage Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 10ms if any
+               cell voltage drops below 2.3 V."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "10ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-022 "Overcurrent Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 5ms if pack
+               current exceeds 400 A (discharge) or 300 A (charge)."
+    integrity: "ASIL_D"
+    quality {
+      metric: "response_time"
+      target: "5ms"
+      verification: "HIL fault injection"
+    }
+  }
+
+  req BMS-023 "Overtemperature Protection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall open the main contactors within 100ms if any
+               cell temperature exceeds 60°C."
+    integrity: "ASIL_C"
+  }
+
+  req BMS-024 "Isolation Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall continuously monitor HV isolation resistance
+               and trigger a warning below 500 Ω/V and a fault below 100 Ω/V."
+    integrity: "ASIL_C"
+  }
+
+  // --- Thermal management ---
+
+  req BMS-030 "Thermal Regulation" {
+    type: functional
+    priority: must
+    statement: "The BMS shall maintain all cell temperatures between 15°C
+               and 45°C during normal operation by controlling the coolant
+               pump and heating elements."
+  }
+
+  req BMS-031 "Pre-Conditioning" {
+    type: functional
+    priority: should
+    statement: "The BMS shall support battery pre-conditioning (heating
+               before fast charge) to bring cell temperatures above 10°C."
+  }
+
+  // --- Balancing ---
+
+  req BMS-040 "Cell Balancing" {
+    type: functional
+    priority: must
+    statement: "The BMS shall perform passive cell balancing to maintain
+               cell voltage delta below 20 mV across all series cells."
+  }
+
+  // --- Charging ---
+
+  req BMS-050 "Charge Control" {
+    type: functional
+    priority: must
+    statement: "The BMS shall communicate dynamic charge current limits
+               to the charger via CAN at 10 Hz based on cell voltages,
+               temperatures, and SOC."
+  }
+
+  req BMS-051 "DC Fast Charge Support" {
+    type: functional
+    priority: must
+    statement: "The BMS shall support DC fast charging up to 150 kW
+               using CCS protocol with dynamic power negotiation."
+  }
+
+  // --- Diagnostics ---
+
+  req BMS-060 "Fault Logging" {
+    type: non_functional
+    priority: must
+    statement: "The BMS shall log all detected faults with timestamp,
+               severity, module/cell ID and measured value in persistent
+               memory (min. 64 entries)."
+  }
+
+  req BMS-061 "Contactor Welding Detection" {
+    type: functional
+    priority: must
+    statement: "The BMS shall detect welded contactors by measuring
+               voltage difference across open contactors."
+    integrity: "ASIL_D"
+  }
+
+  // --- Communication ---
+
+  req BMS-070 "VCU Communication" {
+    type: functional
+    priority: must
+    statement: "The BMS shall report pack state (voltage, current, SOC,
+               SOH, limits, faults) to the vehicle control unit via
+               CAN-FD at 100 Hz."
+  }
+
+  req BMS-071 "Diagnostic Communication" {
+    type: non_functional
+    priority: should
+    statement: "The BMS shall support UDS-based diagnostic access for
+               reading cell data, fault memory, and calibration parameters."
+  }
+
+  // --- Power state management ---
+
+  req BMS-080 "Power State Management" {
+    type: functional
+    priority: must
+    statement: "The BMS shall implement a deterministic state machine with
+               defined transitions (INIT → STANDBY → PRECHARGE → DRIVE → CHARGE →
+               SHUTDOWN → FAULT) and report current state to VCU at 100 Hz."
+    integrity: "ASIL_C"
+  }
+
+  req BMS-081 "Safe Shutdown" {
+    type: functional
+    priority: must
+    statement: "The BMS shall execute a safe shutdown sequence (open contactors,
+               disable balancing, store fault log) within 100 ms upon receiving
+               a critical fault or external shutdown request."
+    integrity: "ASIL_D"
+  }
+
+  // --- Insulation monitoring ---
+
+  req BMS-090 "Continuous Insulation Monitoring" {
+    type: functional
+    priority: must
+    statement: "The BMS shall continuously monitor HV-to-chassis isolation
+               resistance with a dedicated measurement circuit, independent
+               of the pack voltage measurement path."
+    integrity: "ASIL_C"
+  }
+
+  // --- Data logging ---
+
+  req BMS-100 "Data Logging" {
+    type: non_functional
+    priority: must
+    statement: "The BMS shall log cell voltage/temperature snapshots every 10 s
+               (72 h rolling buffer) and store at least 1000 fault events with
+               timestamps in persistent non-volatile memory."
+  }
+
+  // --- Self-test ---
+
+  req BMS-110 "Power-on Self-Test" {
+    type: functional
+    priority: must
+    statement: "The BMS shall perform a power-on self-test validating sensor
+               chain integrity, actuator response, and communication links
+               within 2 s before transitioning to STANDBY."
+    integrity: "ASIL_B"
+  }
+}
