@@ -1,0 +1,548 @@
+// -----------------------------------------------------------------------------
+// Functional Architecture (F Layer)
+// -----------------------------------------------------------------------------
+
+functional "BMS Functions" {
+
+  // =========================================================================
+  // Sense — Data acquisition functions
+  // =========================================================================
+
+  function AcquireCellData: source {
+    port cellDataOut: out ModuleArray
+    port cellStatsOut: out CellStatistics
+    tags: [real-time, safety-relevant]
+    integrity: "ASIL_C"
+
+    function MeasureCellVoltages: source {
+      port voltagesOut: out ModuleArray
+    }
+
+    function MeasureCellTemperatures: source {
+      port temperaturesOut: out ModuleArray
+    }
+
+    function CalcCellStatistics: transform {
+      port cellsIn: in ModuleArray
+      port statsOut: out CellStatistics
+    }
+
+    flow MeasureCellVoltages.voltagesOut -> CalcCellStatistics.cellsIn
+
+    // Delegation: expose child outputs as parent outputs
+    flow MeasureCellVoltages.voltagesOut -> cellDataOut : delegation
+    flow CalcCellStatistics.statsOut -> cellStatsOut : delegation
+  }
+
+  function MeasurePackElectrical: source {
+    port voltageOut: out PackVoltage
+    port currentOut: out PackCurrent
+    port isolationOut: out IsolationMeasurement
+    integrity: "ASIL_D"
+  }
+
+  function MeasureCoolant: source {
+    port coolantTempIn: out CoolantTemp
+    port coolantTempOut: out CoolantTemp
+    port coolantFlowOut: out CoolantFlow
+  }
+
+  // =========================================================================
+  // Think — Processing and control functions
+  // =========================================================================
+
+  function EstimateState: transform {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port voltageIn: in PackVoltage
+    port currentIn: in PackCurrent
+    port socOut: out SOC
+    port sohOut: out SOH
+    port energyOut: out Energy
+
+    function EstimateSOC: transform {
+      port currentIn: in PackCurrent
+      port voltageIn: in PackVoltage
+      port cellStatsIn: in CellStatistics
+      port socOut: out SOC
+
+      // Coulomb counting + Extended Kalman Filter
+      tags: [model-based, real-time]
+    }
+
+    function EstimateSOH: transform {
+      port cellDataIn: in ModuleArray
+      port currentIn: in PackCurrent
+      port socIn: in SOC
+      port sohOut: out SOH
+
+      tags: [model-based]
+    }
+
+    function CalcEnergy: transform {
+      port socIn: in SOC
+      port sohIn: in SOH
+      port energyOut: out Energy
+    }
+
+    flow EstimateSOC.socOut -> EstimateSOH.socIn
+    flow EstimateSOC.socOut -> CalcEnergy.socIn
+    flow EstimateSOH.sohOut -> CalcEnergy.sohIn
+
+    // Delegation: route parent inputs to children
+    flow cellStatsIn -> EstimateSOC.cellStatsIn : delegation
+    flow voltageIn -> EstimateSOC.voltageIn : delegation
+    flow currentIn -> EstimateSOC.currentIn : delegation
+    flow cellDataIn -> EstimateSOH.cellDataIn : delegation
+    flow currentIn -> EstimateSOH.currentIn : delegation
+
+    // Delegation: expose child outputs as parent outputs
+    flow EstimateSOC.socOut -> socOut : delegation
+    flow EstimateSOH.sohOut -> sohOut : delegation
+    flow CalcEnergy.energyOut -> energyOut : delegation
+  }
+
+  function ComputeLimits: transform {
+    port socIn: in SOC
+    port cellStatsIn: in CellStatistics
+    port currentIn: in PackCurrent
+    port limitsOut: out ChargeLimits
+    integrity: "ASIL_C"
+
+    function CalcCurrentLimits: transform {
+      port socIn: in SOC
+      port cellStatsIn: in CellStatistics
+      port limitsOut: out ChargeLimits
+    }
+
+    function DeratePower: transform {
+      port limitsIn: in ChargeLimits
+      port cellStatsIn: in CellStatistics
+      port limitsOut: out ChargeLimits
+      // Temperature- and SOC-based derating curves
+    }
+
+    flow CalcCurrentLimits.limitsOut -> DeratePower.limitsIn
+
+    // Delegation
+    flow socIn -> CalcCurrentLimits.socIn : delegation
+    flow cellStatsIn -> CalcCurrentLimits.cellStatsIn : delegation
+    flow cellStatsIn -> DeratePower.cellStatsIn : delegation
+    flow DeratePower.limitsOut -> limitsOut : delegation
+  }
+
+  function ControlBalancing: control {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port balancingCmdOut: out ModuleArray
+
+    function SelectCellsForBalancing: transform {
+      port cellDataIn: in ModuleArray
+      port statsIn: in CellStatistics
+      port targetCellsOut: out ModuleArray
+    }
+
+    function CalcBalancingDuty: transform {
+      port targetCellsIn: in ModuleArray
+      port commandsOut: out ModuleArray
+    }
+
+    flow SelectCellsForBalancing.targetCellsOut -> CalcBalancingDuty.targetCellsIn
+
+    // Delegation
+    flow cellDataIn -> SelectCellsForBalancing.cellDataIn : delegation
+    flow cellStatsIn -> SelectCellsForBalancing.statsIn : delegation
+    flow CalcBalancingDuty.commandsOut -> balancingCmdOut : delegation
+  }
+
+  function ControlThermal: control {
+    port cellStatsIn: in CellStatistics
+    port coolantTempIn: in CoolantTemp
+    port coolantFlowIn: in CoolantFlow
+    port thermalStatusOut: out ThermalStatus
+
+    function DetermineAction: transform {
+      port cellStatsIn: in CellStatistics
+      port coolantIn: in CoolantTemp
+      port actionOut: out ThermalAction
+    }
+
+    function CalcPumpValve: transform {
+      port actionIn: in ThermalAction
+      port cellStatsIn: in CellStatistics
+      port pumpDutyOut: out Percentage
+      port valvePositionOut: out Percentage
+    }
+
+    flow DetermineAction.actionOut -> CalcPumpValve.actionIn
+
+    // Delegation
+    flow cellStatsIn -> DetermineAction.cellStatsIn : delegation
+    flow coolantTempIn -> DetermineAction.coolantIn : delegation
+    flow cellStatsIn -> CalcPumpValve.cellStatsIn : delegation
+  }
+
+  function ControlCharging: control {
+    port socIn: in SOC
+    port limitsIn: in ChargeLimits
+    port cellStatsIn: in CellStatistics
+    port chargeRequestIn: in ChargeRequest
+    port chargeLimitsOut: out ChargeLimits
+    port contactorCmdOut: out ContactorCommand
+
+    function NegotiateChargePower: transform {
+      port requestIn: in ChargeRequest
+      port limitsIn: in ChargeLimits
+      port cellStatsIn: in CellStatistics
+      port negotiatedOut: out ChargeLimits
+    }
+
+    function ControlPrecharge: control {
+      port voltageIn: in PackVoltage
+      port contactorCmdOut: out ContactorCommand
+    }
+
+    // Delegation
+    flow chargeRequestIn -> NegotiateChargePower.requestIn : delegation
+    flow limitsIn -> NegotiateChargePower.limitsIn : delegation
+    flow cellStatsIn -> NegotiateChargePower.cellStatsIn : delegation
+    flow NegotiateChargePower.negotiatedOut -> chargeLimitsOut : delegation
+    flow ControlPrecharge.contactorCmdOut -> contactorCmdOut : delegation
+  }
+
+  function SuperviseSafety: control {
+    port cellDataIn: in ModuleArray
+    port cellStatsIn: in CellStatistics
+    port voltageIn: in PackVoltage
+    port currentIn: in PackCurrent
+    port isolationIn: in IsolationMeasurement
+    port contactorCmdOut: out ContactorCommand
+    port faultOut: out FaultEntry
+    integrity: "ASIL_D"
+    tags: [safety-relevant, real-time]
+
+    function CheckCellLimits: transform {
+      port cellDataIn: in ModuleArray
+      port statsIn: in CellStatistics
+      port faultOut: out FaultEntry
+      integrity: "ASIL_D"
+    }
+
+    function CheckPackLimits: transform {
+      port voltageIn: in PackVoltage
+      port currentIn: in PackCurrent
+      port faultOut: out FaultEntry
+      integrity: "ASIL_D"
+    }
+
+    function CheckIsolation: transform {
+      port isolationIn: in IsolationMeasurement
+      port faultOut: out FaultEntry
+      integrity: "ASIL_C"
+    }
+
+    function DecideContactor: control {
+      port cellFaultIn: in FaultEntry
+      port packFaultIn: in FaultEntry
+      port isoFaultIn: in FaultEntry
+      port contactorCmdOut: out ContactorCommand
+      integrity: "ASIL_D"
+    }
+
+    flow CheckCellLimits.faultOut -> DecideContactor.cellFaultIn
+    flow CheckPackLimits.faultOut -> DecideContactor.packFaultIn
+    flow CheckIsolation.faultOut -> DecideContactor.isoFaultIn
+
+    // Delegation
+    flow cellDataIn -> CheckCellLimits.cellDataIn : delegation
+    flow cellStatsIn -> CheckCellLimits.statsIn : delegation
+    flow voltageIn -> CheckPackLimits.voltageIn : delegation
+    flow currentIn -> CheckPackLimits.currentIn : delegation
+    flow isolationIn -> CheckIsolation.isolationIn : delegation
+    flow DecideContactor.contactorCmdOut -> contactorCmdOut : delegation
+  }
+
+  function ManageDiagnostics: transform {
+    port faultIn: in FaultEntry
+    port packStateIn: in PackState
+    port logOut: out FaultLog
+    port udsResponseOut: out string
+  }
+
+  // --- Power State Management ---
+
+  function ManagePowerState: control {
+    port contactorStatusIn: in ContactorState
+    port faultIn: in FaultEntry
+    port selfTestIn: in Percentage
+    port wakeupIn: in BMSState
+    port systemStateOut: out BMSState
+    port prechargeCmdOut: out ContactorCommand
+    port shutdownCmdOut: out ContactorCommand
+    integrity: "ASIL_C"
+
+    function RunPrechargeSequence: control {
+      port contactorStatusIn: in ContactorState
+      port prechargeCmdOut: out ContactorCommand
+    }
+
+    function CoordinateShutdown: control {
+      port faultLevelIn: in FaultSeverity
+      port shutdownCmdOut: out ContactorCommand
+      integrity: "ASIL_D"
+    }
+
+    function TransitionDriveMode: transform {
+      port currentStateIn: in BMSState
+      port faultLevelIn: in FaultSeverity
+      port selfTestIn: in Percentage
+      port nextStateOut: out BMSState
+    }
+
+    // Delegation
+    flow contactorStatusIn -> RunPrechargeSequence.contactorStatusIn : delegation
+    flow RunPrechargeSequence.prechargeCmdOut -> prechargeCmdOut : delegation
+    flow CoordinateShutdown.shutdownCmdOut -> shutdownCmdOut : delegation
+    flow TransitionDriveMode.nextStateOut -> systemStateOut : delegation
+  }
+
+  // --- Insulation Monitoring (dedicated, independent of pack sensor) ---
+
+  function MonitorInsulation: transform {
+    port rawIsolationIn: in Resistance
+    port isolationStatusOut: out IsolationStatus
+    port isolationFaultOut: out FaultEntry
+    integrity: "ASIL_C"
+
+    function MeasureIsolationResistance: transform {
+      port rawIn: in Resistance
+      port measuredOut: out Resistance
+    }
+
+    function EvaluateIsolationStatus: transform {
+      port measuredIn: in Resistance
+      port statusOut: out IsolationStatus
+      port faultOut: out FaultSeverity
+    }
+
+    flow MeasureIsolationResistance.measuredOut -> EvaluateIsolationStatus.measuredIn
+
+    // Delegation
+    flow rawIsolationIn -> MeasureIsolationResistance.rawIn : delegation
+    flow EvaluateIsolationStatus.statusOut -> isolationStatusOut : delegation
+  }
+
+  // --- Data Logging (black-box recorder) ---
+
+  function LogData: sink {
+    port cellDataLogIn: in ModuleArray
+    port packStateLogIn: in PackState
+    port faultLogIn: in FaultLog
+
+    function RecordCellHistory: sink {
+      port cellDataIn: in ModuleArray
+    }
+
+    function StoreEventLog: sink {
+      port faultIn: in FaultEntry
+      port packStateIn: in PackState
+    }
+
+    // Delegation
+    flow cellDataLogIn -> RecordCellHistory.cellDataIn : delegation
+    flow packStateLogIn -> StoreEventLog.packStateIn : delegation
+  }
+
+  // --- Wake-up Coordination ---
+
+  function CoordinateWakeup: control {
+    port canWakeupIn: in Timestamp
+    port timerTriggerIn: in Timestamp
+    port powerEnableOut: out BMSState
+
+    function DetectWakeupSource: transform {
+      port canIn: in Timestamp
+      port timerIn: in Timestamp
+      port sourceOut: out BMSState
+    }
+
+    function ManageSleepTransition: control {
+      port sourceIn: in BMSState
+      port enableOut: out BMSState
+    }
+
+    flow DetectWakeupSource.sourceOut -> ManageSleepTransition.sourceIn
+
+    // Delegation
+    flow canWakeupIn -> DetectWakeupSource.canIn : delegation
+    flow timerTriggerIn -> DetectWakeupSource.timerIn : delegation
+    flow ManageSleepTransition.enableOut -> powerEnableOut : delegation
+  }
+
+  // --- Power-on Self-Test ---
+
+  function PerformSelfTest: transform {
+    port sensorHealthIn: in Percentage
+    port actuatorHealthIn: in Percentage
+    port selfTestResultOut: out Percentage
+    integrity: "ASIL_B"
+
+    function TestSensorChain: transform {
+      port sensorIn: in Percentage
+      port resultOut: out Percentage
+    }
+
+    function TestActuatorChain: transform {
+      port actuatorIn: in Percentage
+      port resultOut: out Percentage
+    }
+
+    // Delegation
+    flow sensorHealthIn -> TestSensorChain.sensorIn : delegation
+    flow actuatorHealthIn -> TestActuatorChain.actuatorIn : delegation
+  }
+
+  // =========================================================================
+  // Act — Output functions
+  // =========================================================================
+
+  function DriveContactors: sink {
+    port contactorCmdIn: in ContactorCommand
+    integrity: "ASIL_D"
+  }
+
+  function DriveBalancing: sink {
+    port balancingCmdIn: in ModuleArray
+  }
+
+  function DriveCoolant: sink {
+    port thermalStatusIn: in ThermalStatus
+  }
+
+  function ReportToVCU: sink {
+    port packStateIn: in PackState
+    port limitsIn: in ChargeLimits
+    port faultLogIn: in FaultLog
+    port systemStateIn: in BMSState
+  }
+
+  // =========================================================================
+  // Top-level flows
+  // =========================================================================
+
+  // Sense -> Think
+  flow AcquireCellData.cellDataOut -> EstimateState.cellDataIn
+  flow AcquireCellData.cellDataOut -> ControlBalancing.cellDataIn
+  flow AcquireCellData.cellDataOut -> SuperviseSafety.cellDataIn
+  flow AcquireCellData.cellStatsOut -> EstimateState.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ComputeLimits.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlBalancing.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlThermal.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> ControlCharging.cellStatsIn
+  flow AcquireCellData.cellStatsOut -> SuperviseSafety.cellStatsIn
+
+  flow MeasurePackElectrical.voltageOut -> EstimateState.voltageIn
+  flow MeasurePackElectrical.currentOut -> EstimateState.currentIn
+  flow MeasurePackElectrical.currentOut -> ComputeLimits.currentIn
+  flow MeasurePackElectrical.voltageOut -> SuperviseSafety.voltageIn
+  flow MeasurePackElectrical.currentOut -> SuperviseSafety.currentIn
+  flow MeasurePackElectrical.isolationOut -> SuperviseSafety.isolationIn
+
+  flow MeasureCoolant.coolantTempIn -> ControlThermal.coolantTempIn
+  flow MeasureCoolant.coolantFlowOut -> ControlThermal.coolantFlowIn
+
+  // Think -> Think
+  flow EstimateState.socOut -> ComputeLimits.socIn
+  flow EstimateState.socOut -> ControlCharging.socIn
+  flow ComputeLimits.limitsOut -> ControlCharging.limitsIn
+
+  // Think -> Think (new functions)
+  flow SuperviseSafety.faultOut -> ManagePowerState.faultIn
+  flow CoordinateWakeup.powerEnableOut -> ManagePowerState.wakeupIn
+  flow PerformSelfTest.selfTestResultOut -> ManagePowerState.selfTestIn
+  flow MonitorInsulation.isolationFaultOut -> ManageDiagnostics.faultIn
+
+  // Think -> Act
+  flow SuperviseSafety.contactorCmdOut -> DriveContactors.contactorCmdIn
+  flow ManagePowerState.prechargeCmdOut -> DriveContactors.contactorCmdIn
+  flow ManagePowerState.shutdownCmdOut -> DriveContactors.contactorCmdIn
+  flow ControlBalancing.balancingCmdOut -> DriveBalancing.balancingCmdIn
+  flow ControlThermal.thermalStatusOut -> DriveCoolant.thermalStatusIn
+  flow SuperviseSafety.faultOut -> ManageDiagnostics.faultIn
+  flow ControlCharging.chargeLimitsOut -> ReportToVCU.limitsIn
+  flow ManagePowerState.systemStateOut -> ReportToVCU.systemStateIn
+
+  // Think -> Sink (logging)
+  flow AcquireCellData.cellDataOut -> LogData.cellDataLogIn
+  flow ManageDiagnostics.logOut -> LogData.faultLogIn
+
+  // =========================================================================
+  // Interfaces and actors
+  // =========================================================================
+
+  interface CellSensorInterface {
+    provided cellVoltages: ModuleArray
+    provided cellTemperatures: ModuleArray
+  }
+
+  interface PackSensorInterface {
+    provided packVoltage: PackVoltage
+    provided packCurrent: PackCurrent
+    provided isolation: IsolationMeasurement
+  }
+
+  interface CoolantSensorInterface {
+    provided coolantTemps: CoolantTemp
+    provided coolantFlow: CoolantFlow
+  }
+
+  interface ContactorInterface {
+    required contactorCmd: ContactorCommand
+  }
+
+  interface BalancingInterface {
+    required balancingCmd: ModuleArray
+  }
+
+  interface CoolantActuatorInterface {
+    required pumpDuty: Percentage
+    required valvePosition: Percentage
+  }
+
+  interface VCUInterface {
+    required packState: PackState
+    required chargeLimits: ChargeLimits
+    required faultLog: FaultLog
+  }
+
+  interface ChargerInterface {
+    provided chargeRequest: ChargeRequest
+    required chargeLimits: ChargeLimits
+  }
+
+  interface DiagnosticInterface {
+    provided udsRequest: string
+    required udsResponse: string
+  }
+
+  actor VehicleControlUnit: external_system {
+    interfaces: [VCUInterface]
+  }
+
+  actor DCCharger: external_system {
+    interfaces: [ChargerInterface]
+  }
+
+  actor DiagnosticTester: external_system {
+    interfaces: [DiagnosticInterface]
+  }
+
+  actor BatteryPack: environment {
+    interfaces: [CellSensorInterface, PackSensorInterface,
+                 ContactorInterface, BalancingInterface]
+  }
+
+  actor CoolingCircuit: environment {
+    interfaces: [CoolantSensorInterface, CoolantActuatorInterface]
+  }
+}
